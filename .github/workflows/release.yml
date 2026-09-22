@@ -29,9 +29,7 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            . -> target
-            src-tauri -> target
+          workspaces: . -> target
 
       - name: Install deps
         run: npm ci
@@ -54,10 +52,26 @@ jobs:
             -replace '"version":\s*"[^"]+"', "`"version`": `"$version`"" `
             | Set-Content src-tauri/tauri.conf.json -NoNewline
 
+      - name: Sanitize signing secrets
+        shell: bash
+        run: |
+          printf '%s' "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" | tr -d '\r\n' > /tmp/key.b64
+          {
+            echo "TAURI_SIGNING_PRIVATE_KEY<<EOF_KEY"
+            cat /tmp/key.b64
+            echo ""
+            echo "EOF_KEY"
+          } >> "$GITHUB_ENV"
+          printf '%s' "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" | tr -d '\r\n' > /tmp/pw.txt
+          {
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD<<EOF_PW"
+            cat /tmp/pw.txt
+            echo ""
+            echo "EOF_PW"
+          } >> "$GITHUB_ENV"
+          rm -f /tmp/key.b64 /tmp/pw.txt
+
       - name: Build NextGestures
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri build
 
       - name: Prepare release notes
@@ -76,7 +90,7 @@ jobs:
         shell: pwsh
         run: |
           $version = "${env:GITHUB_REF_NAME}" -replace '^v', ''
-          $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
+          $exe = Get-ChildItem target/release/bundle/nsis/*.exe | Select-Object -First 1
           $signature = Get-Content "$($exe.FullName).sig" -Raw
           $notes = if (Test-Path Release.md) { Get-Content Release.md -Raw } else { "Release $version" }
 
@@ -97,8 +111,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/nsis/*.sig
+            target/release/bundle/nsis/*.exe
+            target/release/bundle/nsis/*.sig
             latest.json
           body_path: ${{ steps.notes.outputs.path }}
           generate_release_notes: ${{ steps.notes.outputs.gen }}
