@@ -1,0 +1,64 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "NextGestures",
+  "version": "0.1.2",
+  "identifier": "com.nextgestures.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "url": "index.html",
+        "title": "NextGestures",
+        "width": 1040,
+        "height": 700,
+        "minWidth": 880,
+        "minHeight": 560,
+        "visible": true,
+        "center": true
+      },
+      {
+        "label": "overlay",
+        "url": "overlay.html",
+        "width": 100,
+        "height": 100,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "shadow": false,
+        "focus": false,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/DoerrDev/NextGestures/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVBN0Q0RTQwQTM5RDU4MEIKUldRTFdKMmpRRTU5NmtwQURnMHdweXpUdzhGUTRjTTBpK2IrSjBQMW43S0dSUndDMWkwZHRPMUIK",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

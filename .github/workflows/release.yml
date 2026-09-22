@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            src-tauri -> target
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Stamp version from tag
+        shell: pwsh
+        run: |
+          $version = "${env:GITHUB_REF_NAME}" -replace '^v', ''
+          Write-Host "Stamping version $version"
+
+          (Get-Content package.json -Raw) `
+            -replace '"version":\s*"[^"]+"', "`"version`": `"$version`"" `
+            | Set-Content package.json -NoNewline
+
+          (Get-Content Cargo.toml -Raw) `
+            -replace '(?m)^version = "[^"]+"', "version = `"$version`"" `
+            | Set-Content Cargo.toml -NoNewline
+
+          (Get-Content src-tauri/tauri.conf.json -Raw) `
+            -replace '"version":\s*"[^"]+"', "`"version`": `"$version`"" `
+            | Set-Content src-tauri/tauri.conf.json -NoNewline
+
+      - name: Build NextGestures
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri build
+
+      - name: Prepare release notes
+        id: notes
+        shell: bash
+        run: |
+          if [ -s Release.md ]; then
+            echo "path=Release.md" >> "$GITHUB_OUTPUT"
+            echo "gen=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=" >> "$GITHUB_OUTPUT"
+            echo "gen=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build updater manifest
+        shell: pwsh
+        run: |
+          $version = "${env:GITHUB_REF_NAME}" -replace '^v', ''
+          $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
+          $signature = Get-Content "$($exe.FullName).sig" -Raw
+          $notes = if (Test-Path Release.md) { Get-Content Release.md -Raw } else { "Release $version" }
+
+          $manifest = [ordered]@{
+            version   = $version
+            notes     = $notes
+            pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            platforms = [ordered]@{
+              "windows-x86_64" = [ordered]@{
+                signature = $signature.Trim()
+                url       = "https://github.com/${env:GITHUB_REPOSITORY}/releases/download/${env:GITHUB_REF_NAME}/$($exe.Name)"
+              }
+            }
+          }
+          $manifest | ConvertTo-Json -Depth 5 | Set-Content latest.json -NoNewline
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/*.sig
+            latest.json
+          body_path: ${{ steps.notes.outputs.path }}
+          generate_release_notes: ${{ steps.notes.outputs.gen }}
+          draft: false
+          prerelease: false

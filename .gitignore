@@ -1,0 +1,10 @@
+/target
+/node_modules
+/dist
+/keys
+build.ps1
+.idea/*
+.playwright-mcp/*
+.playwright-cli/
+*.i64
+*.idb
