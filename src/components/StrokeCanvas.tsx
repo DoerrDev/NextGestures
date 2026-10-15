@@ -1,10 +1,10 @@
 import { useEffect, useRef } from 'react'
-import type { Point, Region, WheelDir } from '../api'
+import type { Point, Region, TriggerButton, WheelDir } from '../api'
 import arrowUpLeft from '../assets/icons/arrow-up-left.svg?raw'
 import arrowUpRight from '../assets/icons/arrow-up-right.svg?raw'
 import arrowDownLeft from '../assets/icons/arrow-down-left.svg?raw'
 import arrowDownRight from '../assets/icons/arrow-down-right.svg?raw'
-import triangle from '../assets/icons/triangle.svg?raw'
+import gestureMouse from '../assets/icons/gesture-mouse.svg?raw'
 
 /** 取出 lucide svg 里的所有 path（24x24 视口） */
 function paths(svg: string): Path2D[] {
@@ -18,7 +18,7 @@ const CORNER_ICON: Partial<Record<Region, Path2D[]>> = {
   BottomLeft: paths(arrowDownLeft),
   BottomRight: paths(arrowDownRight),
 }
-const TRIANGLE = paths(triangle)
+const [MOUSE_BODY, MOUSE_LEFT, MOUSE_RIGHT, MOUSE_DIVIDER, MOUSE_WHEEL, MOUSE_SCROLL_UP, MOUSE_SCROLL_DOWN] = paths(gestureMouse)
 
 interface Props {
   points: Point[]
@@ -26,6 +26,10 @@ interface Props {
   times?: number[]
   region?: Region | null
   wheel?: WheelDir[]
+  trigger?: TriggerButton | null
+  leftClick?: boolean
+  /** 实时录制不循环播放，鼠标跟随当前采样终点。 */
+  live?: boolean
   color?: string
   width?: number
   glowColor?: string
@@ -35,16 +39,22 @@ interface Props {
 
 /** 回放结束后停留的时间 */
 const HOLD_MS = 900
-/** 回放中每个滚轮箭头出现的间隔 */
-const WHEEL_STEP_MS = 250
+/** 每个滚轮方向独立演示半秒，再切换到下一个方向。 */
+const WHEEL_STEP_MS = 500
+const CLICK_PAUSE_MS = 180
+const CLICK_PRESS_MS = 220
+const CLICK_RELEASE_MS = 180
 const MARK = '#5a5a5a'
 
-/** 把任意坐标系的轨迹等比铺进画布，并标出起点与终点方向；同时画出边角标记与滚轮序列 */
+/** 回放轨迹，并通过鼠标 SVG 展示按键、滚轮方向和终点点击。 */
 export function StrokeCanvas({
   points,
   times,
   region,
   wheel = [],
+  trigger,
+  leftClick = false,
+  live = false,
   color = '#383838',
   width = 3,
   glowColor,
@@ -69,10 +79,13 @@ export function StrokeCanvas({
     const W = box.width
     const H = box.height
     const hasStroke = points.length >= 2
-    /** 滚轮箭头占用底部一条 */
-    const band = wheel.length > 0 ? Math.min(28, H * 0.22) : 0
     /** 缩略图很小时按比例收窄留白，避免轨迹被压成一团 */
-    const pad = Math.max(3, Math.min(14, Math.min(W, H - band) * 0.14))
+    const mouseSize = hasStroke
+      ? Math.max(14, Math.min(30, Math.min(W, H) * 0.2))
+      : Math.max(20, Math.min(64, Math.min(W, H) * 0.65))
+    const showMouse = (hasStroke && !!trigger) || wheel.length > 0
+    const pad = Math.max(showMouse ? mouseSize / 2 + 5 : 3,
+      Math.min(14, Math.min(W, H) * 0.14))
 
     const drawRegion = () => {
       if (!region) return
@@ -104,30 +117,88 @@ export function StrokeCanvas({
       ctx.restore()
     }
 
-    /** 画前 n 个滚轮箭头 */
-    const drawWheel = (n: number) => {
-      if (wheel.length === 0) return
-      const size = Math.min(band * 0.7, 18) || 18
-      const gap = size * 1.5
-      const cy = hasStroke ? H - band / 2 : H / 2
-      const x0 = W / 2 - ((wheel.length - 1) * gap) / 2
+    // 旧配置没有时间戳时，组合手势也能依次演示轨迹、滚轮和终点点击。
+    const anim = !live && hasStroke
+      ? times && times.length === points.length && times[times.length - 1] > 0
+        ? times
+        : leftClick || wheel.length > 0 ? points.map((_, i) => (i / (points.length - 1)) * 1200) : null
+      : null
+    const strokeTotal = anim ? anim[anim.length - 1] : 0
+    const wheelTotal = live ? 0 : wheel.length * WHEEL_STEP_MS
+    const clickStart = strokeTotal + wheelTotal + CLICK_PAUSE_MS
+    const releaseAt = leftClick ? clickStart + CLICK_PRESS_MS + CLICK_RELEASE_MS : strokeTotal + wheelTotal
+
+    const drawMouse = (x: number, y: number, t: number) => {
+      if (!showMouse) return
+      const wheelTime = live ? t : t - strokeTotal
+      const wheelIndex = live ? wheel.length - 1 : Math.floor(wheelTime / WHEEL_STEP_MS)
+      const scrolling = wheelTime >= 0 && wheelIndex >= 0 && wheelIndex < wheel.length
+        && (!live || wheelTime < WHEEL_STEP_MS)
+      const scrollDir = scrolling ? wheel[wheelIndex] : null
+      const scrollProgress = (wheelTime % WHEEL_STEP_MS) / WHEEL_STEP_MS
+      const rightDown = trigger === 'Right' && (live || t < releaseAt || (t === Infinity && leftClick))
+      const leftDown = leftClick && (live || t === Infinity || (t >= clickStart && t < clickStart + CLICK_PRESS_MS))
       ctx.save()
-      ctx.fillStyle = color
-      for (let i = 0; i < Math.min(n, wheel.length); i++) {
+      ctx.translate(x - mouseSize / 2, y - mouseSize / 2)
+      ctx.scale(mouseSize / ICON, mouseSize / ICON)
+      ctx.lineCap = 'round'
+      ctx.lineJoin = 'round'
+      ctx.fillStyle = '#fffdf7'
+      ctx.fill(MOUSE_BODY)
+      if (rightDown) {
+        ctx.fillStyle = '#52b6f5'
+        ctx.fill(MOUSE_RIGHT)
+      }
+      if (leftDown) {
+        ctx.fillStyle = '#ffad56'
+        ctx.fill(MOUSE_LEFT)
+      }
+      ctx.strokeStyle = '#383838'
+      ctx.lineWidth = 1.5
+      ctx.stroke(MOUSE_BODY)
+      ctx.stroke(MOUSE_DIVIDER)
+      ctx.fillStyle = scrolling ? '#d8efff' : '#fffdf7'
+      ctx.fill(MOUSE_WHEEL)
+      ctx.lineWidth = 1
+      ctx.strokeStyle = scrolling || (trigger === 'Middle' && (live || t < releaseAt)) ? '#168dd1' : '#383838'
+      ctx.stroke(MOUSE_WHEEL)
+      if (scrollDir) {
+        // 在滚轮内部移动刻纹，鼠标腹部的箭头同步向滚动方向轻移。
+        const direction = scrollDir === 'Up' ? -1 : 1
+        const offset = direction * scrollProgress * 6
         ctx.save()
-        ctx.translate(x0 + i * gap, cy)
-        if (wheel[i] === 'Down') ctx.rotate(Math.PI)
-        ctx.scale(size / ICON, size / ICON)
-        ctx.translate(-ICON / 2, -ICON / 2)
-        TRIANGLE.forEach((p) => ctx.fill(p))
+        ctx.clip(MOUSE_WHEEL)
+        ctx.lineWidth = 0.8
+        for (let i = -3; i <= 4; i++) {
+          const notchY = 4 + i * 2 + offset
+          ctx.beginPath()
+          ctx.moveTo(10.5, notchY)
+          ctx.lineTo(13.5, notchY)
+          ctx.stroke()
+        }
+        ctx.restore()
+        ctx.save()
+        ctx.translate(0, direction * Math.sin(scrollProgress * Math.PI) * 1.2)
+        ctx.lineWidth = 1.6
+        ctx.stroke(scrollDir === 'Up' ? MOUSE_SCROLL_UP : MOUSE_SCROLL_DOWN)
         ctx.restore()
       }
       ctx.restore()
-    }
 
-    const anim = hasStroke && times && times.length === points.length ? times : null
-    const strokeTotal = anim ? anim[anim.length - 1] : 0
-    const wheelTotal = wheel.length * WHEEL_STEP_MS
+      // 点击时扩散一圈，配合左键色块表达按下、抬起的瞬间。
+      const elapsed = t - clickStart
+      if (!live && leftClick && elapsed >= 0 && elapsed < CLICK_PRESS_MS + CLICK_RELEASE_MS) {
+        const progress = elapsed / (CLICK_PRESS_MS + CLICK_RELEASE_MS)
+        ctx.save()
+        ctx.globalAlpha = 1 - progress
+        ctx.strokeStyle = '#e68a2e'
+        ctx.lineWidth = 1.5
+        ctx.beginPath()
+        ctx.arc(x - mouseSize * 0.15, y - mouseSize * 0.25, mouseSize * (0.2 + progress * 0.45), 0, Math.PI * 2)
+        ctx.stroke()
+        ctx.restore()
+      }
+    }
 
     let at = (p: Point): Point => p
     if (hasStroke) {
@@ -137,7 +208,7 @@ export function StrokeCanvas({
       const minY = Math.min(...ys)
       const spanX = Math.max(...xs) - minX
       const spanY = Math.max(...ys) - minY
-      const availH = H - band
+      const availH = H
       const scale = Math.min(
         (W - pad * 2) / Math.max(spanX, 1e-3),
         (availH - pad * 2) / Math.max(spanY, 1e-3),
@@ -197,13 +268,13 @@ export function StrokeCanvas({
           ctx.arc(tx, ty, width + 2.5, 0, Math.PI * 2)
           ctx.stroke()
         }
+        drawMouse(tx, ty, t)
+      } else {
+        drawMouse(W / 2, H / 2, t)
       }
-
-      const wt = t - strokeTotal
-      drawWheel(t === Infinity ? wheel.length : Math.floor(wt / WHEEL_STEP_MS) + 1)
     }
 
-    const total = strokeTotal + wheelTotal
+    const total = live ? (wheel.length > 0 ? WHEEL_STEP_MS : 0) : releaseAt
     if (total <= 0) {
       draw(Infinity)
       return
@@ -213,12 +284,13 @@ export function StrokeCanvas({
     const start = performance.now()
     const cycle = total + HOLD_MS
     const tick = (now: number) => {
-      draw((now - start) % cycle)
-      raf = requestAnimationFrame(tick)
+      const elapsed = now - start
+      draw(live ? elapsed : elapsed % cycle)
+      if (!live || elapsed < total) raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
-  }, [points, times, region, wheel, color, width, glowColor, glowBlur])
+  }, [points, times, region, wheel, trigger, leftClick, live, color, width, glowColor, glowBlur])
 
   return <canvas ref={ref} className={className} />
 }

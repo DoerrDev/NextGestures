@@ -40,6 +40,7 @@ pub enum HookEvent {
     Start { button: Option<TriggerButton>, region: Option<Region>, point: (i32, i32) },
     Move { point: (i32, i32) },
     Wheel { dir: WheelDir, region: Option<Region> },
+    LeftClick { point: (i32, i32) },
     End {
         button: Option<TriggerButton>,
         region: Option<Region>,
@@ -47,6 +48,7 @@ pub enum HookEvent {
         points: Vec<(i32, i32)>,
         times: Vec<u32>,
         wheel: Vec<WheelDir>,
+        left_click: bool,
     },
     Cancel,
     /// 候选态直接松手，需要补发一次真实点击
@@ -165,6 +167,9 @@ struct HookState {
     wheel_acc: i32,
     /// 最后一次滚轮时间，用来判定"滚轮停了"
     last_wheel: Option<Instant>,
+    left_click: bool,
+    /// 吞掉按下后，即使会话已经结束也要吞掉对应的抬起。
+    swallowed_left_down: bool,
 }
 
 thread_local! {
@@ -180,6 +185,8 @@ thread_local! {
             wheel: Vec::new(),
             wheel_acc: 0,
             last_wheel: None,
+            left_click: false,
+            swallowed_left_down: false,
         })
     };
 }
@@ -214,6 +221,7 @@ fn reset(st: &mut HookState) {
     st.wheel.clear();
     st.wheel_acc = 0;
     st.last_wheel = None;
+    st.left_click = false;
     TICKING.store(false, Relaxed);
 }
 
@@ -231,9 +239,9 @@ fn finish(st: &mut HookState) {
     let points = if st.moved { std::mem::take(&mut st.points) } else { Vec::new() };
     let times = if st.moved { std::mem::take(&mut st.times) } else { Vec::new() };
     let wheel = std::mem::take(&mut st.wheel);
-    let (button, region) = (st.button, st.region);
+    let (button, region, left_click) = (st.button, st.region, st.left_click);
     reset(st);
-    send(HookEvent::End { button, region, points, times, wheel });
+    send(HookEvent::End { button, region, points, times, wheel, left_click });
 }
 
 /// 无按键手势：滚轮停止 IDLE_MS 就是会话边界
@@ -253,6 +261,11 @@ fn on_idle(st: &mut HookState) {
 
 fn handle(st: &mut HookState, msg: u32, ms: &MSLLHOOKSTRUCT) -> bool {
     let pt = (ms.pt.x, ms.pt.y);
+
+    if msg == WM_LBUTTONUP && st.swallowed_left_down {
+        st.swallowed_left_down = false;
+        return true;
+    }
 
     if PICKING.load(Relaxed) {
         match msg {
@@ -277,6 +290,9 @@ fn handle(st: &mut HookState, msg: u32, ms: &MSLLHOOKSTRUCT) -> bool {
     }
 
     if msg == WM_MOUSEWHEEL {
+        if st.left_click {
+            return true;
+        }
         let delta = (ms.mouseData >> 16) as u16 as i16 as i32;
         WHEEL.fetch_add(delta / WHEEL_DELTA, Relaxed);
         if st.phase == Phase::Idle {
@@ -306,7 +322,7 @@ fn handle(st: &mut HookState, msg: u32, ms: &MSLLHOOKSTRUCT) -> bool {
 
     if msg == WM_MOUSEMOVE {
         // 边角滚轮手势不记录轨迹
-        if st.phase == Phase::Idle || st.button.is_none() {
+        if st.phase == Phase::Idle || st.button.is_none() || st.left_click {
             return false;
         }
         st.points.push(pt);
@@ -341,6 +357,15 @@ fn handle(st: &mut HookState, msg: u32, ms: &MSLLHOOKSTRUCT) -> bool {
     if st.phase == Phase::Gesture
         && matches!(msg, WM_LBUTTONDOWN | WM_LBUTTONUP | WM_LBUTTONDBLCLK)
     {
+        if matches!(msg, WM_LBUTTONDOWN | WM_LBUTTONDBLCLK) {
+            st.swallowed_left_down = true;
+            if st.button == Some(TriggerButton::Right) && st.moved && !st.left_click {
+                st.points.push(pt);
+                st.times.push(ms.time);
+                st.left_click = true;
+                send(HookEvent::LeftClick { point: pt });
+            }
+        }
         return true;
     }
 
@@ -393,6 +418,80 @@ fn button_of(msg: u32, ms: &MSLLHOOKSTRUCT) -> Option<(TriggerButton, bool)> {
             Some((btn, msg == WM_XBUTTONDOWN))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(button: TriggerButton) -> HookState {
+        let mut st = HookState {
+            phase: Phase::Idle, button: None, region: None, start: (0, 0),
+            moved: false, points: vec![], times: vec![], wheel: vec![], wheel_acc: 0,
+            last_wheel: None, left_click: false, swallowed_left_down: false,
+        };
+        begin(&mut st, Some(button), None, (0, 0), 0);
+        st
+    }
+
+    fn event(st: &mut HookState, msg: u32, x: i32) -> bool {
+        handle(st, msg, &MSLLHOOKSTRUCT {
+            pt: POINT { x, y: 0 }, time: x as u32,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn endpoint_click_freezes_path_until_right_release() {
+        let mut st = state(TriggerButton::Right);
+        event(&mut st, WM_MOUSEMOVE, 100);
+        assert!(event(&mut st, WM_LBUTTONDOWN, 110));
+        assert!(st.left_click);
+        assert_eq!(st.phase, Phase::Gesture);
+        assert_eq!(st.points.last(), Some(&(110, 0)));
+        let points = st.points.clone();
+        let times = st.times.clone();
+        event(&mut st, WM_MOUSEMOVE, 200);
+        assert!(event(&mut st, WM_MOUSEWHEEL, 200));
+        assert_eq!(st.points, points);
+        assert_eq!(st.times, times);
+        assert!(st.wheel.is_empty());
+        assert!(event(&mut st, WM_LBUTTONUP, 200));
+        assert_eq!(st.phase, Phase::Gesture);
+        assert!(event(&mut st, WM_LBUTTONDOWN, 210));
+        assert_eq!(st.points, points);
+        assert!(event(&mut st, WM_RBUTTONUP, 210));
+        assert_eq!(st.phase, Phase::Idle);
+        assert!(!st.left_click);
+        assert!(event(&mut st, WM_LBUTTONUP, 210));
+        assert!(!st.swallowed_left_down);
+        assert!(!event(&mut st, WM_LBUTTONDOWN, 210));
+        assert!(!event(&mut st, WM_LBUTTONUP, 210));
+    }
+
+    #[test]
+    fn cancellation_preserves_pending_left_release() {
+        let mut st = state(TriggerButton::Right);
+        event(&mut st, WM_MOUSEMOVE, 100);
+        event(&mut st, WM_LBUTTONDOWN, 100);
+        assert!(event(&mut st, WM_MBUTTONDOWN, 100));
+        assert_eq!(st.phase, Phase::Idle);
+        assert!(!st.left_click);
+        assert!(event(&mut st, WM_LBUTTONUP, 100));
+    }
+
+    #[test]
+    fn click_requires_a_right_button_stroke() {
+        let mut st = state(TriggerButton::Right);
+        assert!(!event(&mut st, WM_LBUTTONDOWN, 0));
+        assert!(!st.left_click);
+        let mut st = state(TriggerButton::Middle);
+        event(&mut st, WM_MOUSEMOVE, 100);
+        assert!(event(&mut st, WM_LBUTTONDOWN, 100));
+        assert!(!st.left_click);
+        assert!(event(&mut st, WM_MBUTTONUP, 100));
+        assert!(event(&mut st, WM_LBUTTONUP, 100));
     }
 }
 

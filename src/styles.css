@@ -464,6 +464,54 @@ textarea {
   font-size: var(--text-caption);
 }
 
+.gesture-option {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-8);
+}
+
+.gesture-option-note {
+  margin-top: 6px;
+}
+
+.gesture-help {
+  color: var(--color-pencil-gray);
+}
+
+.gesture-help summary {
+  display: flex;
+  cursor: pointer;
+  list-style: none;
+}
+
+.gesture-help summary::-webkit-details-marker {
+  display: none;
+}
+
+.gesture-help summary:focus-visible {
+  outline: 2px solid var(--color-sky-crayon);
+  outline-offset: 3px;
+}
+
+.gesture-help p {
+  position: absolute;
+  z-index: 2;
+  top: calc(100% + 6px);
+  right: 0;
+  width: min(260px, 100%);
+  box-sizing: border-box;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--color-charcoal-ink);
+  border-radius: var(--radius-sm);
+  background: var(--color-frost-white);
+  box-shadow: var(--shadow-hard-sm);
+  color: var(--color-charcoal-ink);
+  font-size: var(--text-caption);
+  line-height: 1.6;
+}
+
 /* ---------- 顶栏 ---------- */
 .shell {
   display: flex;

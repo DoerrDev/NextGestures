@@ -200,6 +200,7 @@ export function App() {
     if (g.trigger) parts.push(TRIGGER_LABEL[g.trigger])
     if (g.wheel.length > 0)
       parts.push(`${t('wheel')} ${g.wheel.map((w) => (w === 'Up' ? '↑' : '↓')).join('')}`)
+    if (g.left_click) parts.push(t('leftClick'))
     return parts.join(' → ')
   }
 
@@ -395,6 +396,8 @@ export function App() {
                       <StrokeCanvas
                         className="rthumb"
                         points={g.points}
+                        trigger={g.trigger}
+                        leftClick={g.left_click}
                         region={g.region}
                         wheel={g.wheel}
                         color={g.enabled ? config.settings.trail_color : '#a1a1a1'}
@@ -520,6 +523,8 @@ export function App() {
                         className="thumb"
                         points={g.points}
                         times={g.times}
+                        trigger={g.trigger}
+                        leftClick={g.left_click}
                         region={g.region}
                         wheel={g.wheel}
                         color={g.enabled ? config.settings.trail_color : '#a1a1a1'}

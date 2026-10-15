@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import {
   Check,
+  CircleHelp,
   MousePointerClick,
   Power,
   PowerOff,
@@ -81,6 +82,8 @@ export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelet
           trigger: e.payload.trigger,
           region: e.payload.region,
           wheel: e.payload.wheel,
+          left_click: e.payload.left_click,
+          fire_mode: e.payload.left_click ? 'OnRelease' : d.fire_mode,
           points: e.payload.points,
           times: e.payload.times,
         }))
@@ -135,6 +138,9 @@ export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelet
             <StrokeCanvas
               className="frame"
               points={live.points}
+              trigger={live.trigger}
+              leftClick={live.left_click}
+              live
               region={live.region}
               wheel={live.wheel}
               color="#6fc2ff"
@@ -143,6 +149,8 @@ export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelet
             <StrokeCanvas
               className="frame"
               points={draft.points}
+              trigger={draft.trigger}
+              leftClick={draft.left_click}
               times={draft.times}
               region={draft.region}
               wheel={draft.wheel}
@@ -181,8 +189,8 @@ export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelet
                 const v = e.target.value
                 setDraft(
                   v.startsWith('region:')
-                    ? { ...draft, trigger: null, region: v.slice(7) as Gesture['region'] }
-                    : { ...draft, trigger: v as Gesture['trigger'], region: null },
+                    ? { ...draft, trigger: null, region: v.slice(7) as Gesture['region'], left_click: false }
+                    : { ...draft, trigger: v as Gesture['trigger'], region: null, left_click: v === 'Right' && draft.left_click },
                 )
               }}
             >
@@ -202,13 +210,39 @@ export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelet
             <label htmlFor="g-fire">{t('fireMode')}</label>
             <select
               id="g-fire"
-              value={draft.fire_mode}
+              value={draft.left_click ? 'OnRelease' : draft.fire_mode}
+              disabled={draft.left_click}
               onChange={(e) => setDraft({ ...draft, fire_mode: e.target.value as FireMode })}
             >
               <option value="OnRelease">{t('onRelease')}</option>
               <option value="Immediate">{t('immediate')}</option>
             </select>
           </div>
+        </div>
+
+        <div className="field">
+          <div className="gesture-option">
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={draft.left_click ?? false}
+                disabled={recording || draft.trigger !== 'Right' || draft.points.length === 0}
+                onChange={(e) => setDraft({
+                  ...draft,
+                  left_click: e.target.checked,
+                  fire_mode: e.target.checked ? 'OnRelease' : draft.fire_mode,
+                })}
+              />
+              {' '}{t('leftClick')}
+            </label>
+            <details className="gesture-help">
+              <summary aria-label={t('leftClickHelp')}>
+                <CircleHelp size={15} aria-hidden="true" />
+              </summary>
+              <p>{t('leftClickHint')}</p>
+            </details>
+          </div>
+          <p className="field-note gesture-option-note">{t('leftClickShortHint')}</p>
         </div>
 
         <h3 className="pane-sect">{t('action')}</h3>

@@ -31,6 +31,7 @@ export interface Gesture {
   trigger: TriggerButton | null
   region: Region | null
   wheel: WheelDir[]
+  left_click: boolean
   fire_mode: FireMode
   points: Point[]
   times: number[]
@@ -74,6 +75,7 @@ export interface RecordedPayload {
   trigger: TriggerButton | null
   region: Region | null
   wheel: WheelDir[]
+  left_click: boolean
   points: Point[]
   times: number[]
   raw: Point[]
@@ -83,6 +85,7 @@ export interface LivePayload {
   trigger: TriggerButton | null
   region: Region | null
   wheel: WheelDir[]
+  left_click: boolean
   points: Point[]
 }
 
@@ -176,6 +179,7 @@ export function emptyGesture(trigger: TriggerButton = 'Right'): Gesture {
     trigger,
     region: null,
     wheel: [],
+    left_click: false,
     fire_mode: 'OnRelease',
     points: [],
     times: [],

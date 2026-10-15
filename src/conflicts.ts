@@ -107,6 +107,7 @@ export interface ConflictReport {
 function sameTriggerContext(a: Gesture, b: Gesture): boolean {
   return (
     a.trigger === b.trigger &&
+    Boolean(a.left_click) === Boolean(b.left_click) &&
     a.region === b.region &&
     a.wheel.length === b.wheel.length &&
     a.wheel.every((w, i) => w === b.wheel[i])

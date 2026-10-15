@@ -39,6 +39,7 @@ struct Recorded {
     trigger: Option<TriggerButton>,
     region: Option<Region>,
     wheel: Vec<WheelDir>,
+    left_click: bool,
     points: Vec<Point>,
     times: Vec<f32>,
     raw: Vec<[i32; 2]>,
@@ -50,6 +51,7 @@ struct Live {
     trigger: Option<TriggerButton>,
     region: Option<Region>,
     wheel: Vec<WheelDir>,
+    left_click: bool,
     points: Vec<[i32; 2]>,
 }
 
@@ -89,6 +91,7 @@ struct Session {
     button: Option<TriggerButton>,
     region: Option<Region>,
     wheel: Vec<WheelDir>,
+    left_click: bool,
     exe: String,
     raw: Vec<(i32, i32)>,
     fired: bool,
@@ -120,6 +123,7 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
                     button,
                     region,
                     wheel,
+                    left_click: false,
                     exe: window::foreground_exe(),
                     raw: vec![point],
                     fired: false,
@@ -133,6 +137,7 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
                     button: None,
                     region,
                     wheel: vec![],
+                    left_click: false,
                     exe: window::foreground_exe(),
                     raw: vec![],
                     fired: false,
@@ -154,11 +159,21 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
                     on_partial(&app, s);
                 }
             }
-            HookEvent::End { button, region, points, times, wheel } => {
+            HookEvent::LeftClick { point } => {
+                let Some(s) = session.as_mut() else { continue };
+                s.left_click = true;
+                s.raw.push(point);
+                let _ = app.emit_to(overlay::LABEL, "trail:point", [point.0, point.1]);
+                emit_live(&app, s);
+                if !recording(&app) && !s.fired {
+                    on_partial(&app, s);
+                }
+            }
+            HookEvent::End { button, region, points, times, wheel, left_click } => {
                 let s = session.take();
                 if recording(&app) {
                     let _ = app.emit_to(overlay::LABEL, "trail:end", ());
-                    finish_recording(&app, button, region, &points, &times, wheel);
+                    finish_recording(&app, button, region, &points, &times, wheel, left_click);
                     continue;
                 }
                 if s.as_ref().is_some_and(|s| s.fired) {
@@ -166,7 +181,7 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
                     continue;
                 }
                 let exe = s.as_ref().map(|s| s.exe.clone()).unwrap_or_else(window::foreground_exe);
-                match lookup(&app, &exe, button, region, &wheel, &points) {
+                match lookup(&app, &exe, button, region, &wheel, left_click, &points) {
                     Some(hit) => {
                         let show_hint = s.as_ref().is_none_or(|s| {
                             s.shown_name.as_deref() != Some(hit.name.as_str())
@@ -177,7 +192,7 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
                         "手势结束未命中 {button:?} {region:?} {wheel:?} 采样 {} 点 @ {} 最接近: {}",
                         points.len(),
                         exe,
-                        nearest(&app, &exe, button, region, &wheel, &points)
+                        nearest(&app, &exe, button, region, &wheel, left_click, &points)
                     ),
                 }
                 let _ = app.emit_to(overlay::LABEL, "trail:end", ());
@@ -227,6 +242,7 @@ fn emit_live(app: &AppHandle, s: &Session) {
             trigger: s.button,
             region: s.region,
             wheel: s.wheel.clone(),
+            left_click: s.left_click,
             points: s.raw.iter().map(|p| [p.0, p.1]).collect(),
         },
     );
@@ -250,6 +266,7 @@ fn finish_recording(
     points: &[(i32, i32)],
     times: &[u32],
     wheel: Vec<WheelDir>,
+    left_click: bool,
 ) {
     stop_recording(app);
     let raw: Vec<[i32; 2]> = points.iter().map(|p| [p.0, p.1]).collect();
@@ -266,7 +283,7 @@ fn finish_recording(
         Some((norm, times)) if !norm.is_empty() || !wheel.is_empty() => {
             let _ = app.emit(
                 "gesture:recorded",
-                Recorded { trigger: button, region, wheel, points: norm, times, raw },
+                Recorded { trigger: button, region, wheel, left_click, points: norm, times, raw },
             );
         }
         _ => {
@@ -277,7 +294,7 @@ fn finish_recording(
 
 /// 画的过程中实时提示命中的手势名；Immediate 模式直接执行
 fn on_partial(app: &AppHandle, s: &mut Session) {
-    let hit = lookup(app, &s.exe, s.button, s.region, &s.wheel, &s.raw);
+    let hit = lookup(app, &s.exe, s.button, s.region, &s.wheel, s.left_click, &s.raw);
     let name = hit.as_ref().map(|h| h.name.clone());
     if name != s.shown_name {
         s.shown_name = name.clone();
@@ -294,7 +311,7 @@ fn on_partial(app: &AppHandle, s: &mut Session) {
 
 /// 滚轮手势的 Immediate 模式：攒到一格就立刻执行，不等滚轮停
 fn on_wheel_partial(app: &AppHandle, s: &mut Session) {
-    let Some(hit) = lookup(app, &s.exe, s.button, s.region, &s.wheel, &s.raw) else {
+    let Some(hit) = lookup(app, &s.exe, s.button, s.region, &s.wheel, s.left_click, &s.raw) else {
         return;
     };
     if hit.fire_mode != FireMode::Immediate {
@@ -310,9 +327,10 @@ fn to_input<'a>(
     button: Option<TriggerButton>,
     region: Option<Region>,
     wheel: &'a [WheelDir],
+    left_click: bool,
     norm: Option<&'a [Point]>,
 ) -> matcher::Input<'a> {
-    matcher::Input { button, region, wheel, stroke: norm }
+    matcher::Input { button, region, wheel, left_click, stroke: norm }
 }
 
 /// 有轨迹但归一化失败（太短）返回 None
@@ -329,18 +347,24 @@ fn lookup(
     button: Option<TriggerButton>,
     region: Option<Region>,
     wheel: &[WheelDir],
+    left_click: bool,
     raw: &[(i32, i32)],
 ) -> Option<Hit> {
     let norm = norm_of(raw)?;
     let state = app.state::<AppState>();
     let cfg = state.config.read().unwrap();
-    let m = matcher::best(&cfg, exe, to_input(button, region, wheel, norm.as_deref()))?;
+    let m = matcher::best(&cfg, exe, to_input(button, region, wheel, left_click, norm.as_deref()))?;
     Some(Hit {
         profile_id: m.profile_id.to_string(),
         gesture_id: m.gesture.id.clone(),
         name: m.gesture.name.clone(),
         score: m.score,
-        fire_mode: m.gesture.fire_mode,
+        // 右键组合存在时保留追加左键的机会，统一在右键松开时执行。
+        fire_mode: if left_click || matcher::requires_release(&cfg, exe, button) {
+            FireMode::OnRelease
+        } else {
+            m.gesture.fire_mode
+        },
         action: m.gesture.action.clone(),
     })
 }
@@ -352,6 +376,7 @@ fn nearest(
     button: Option<TriggerButton>,
     region: Option<Region>,
     wheel: &[WheelDir],
+    left_click: bool,
     raw: &[(i32, i32)],
 ) -> String {
     let Some(norm) = norm_of(raw) else {
@@ -359,7 +384,7 @@ fn nearest(
     };
     let state = app.state::<AppState>();
     let cfg = state.config.read().unwrap();
-    match matcher::best_above(&cfg, exe, to_input(button, region, wheel, norm.as_deref()), 0.0) {
+    match matcher::best_above(&cfg, exe, to_input(button, region, wheel, left_click, norm.as_deref()), 0.0) {
         Some(m) => format!("{} ({:.3})", m.gesture.name, m.score),
         None => "无候选手势".into(),
     }

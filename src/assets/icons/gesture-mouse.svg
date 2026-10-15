@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <path id="body" d="M12 2C7.6 2 5 5 5 9v6c0 4 2.6 7 7 7s7-3 7-7V9c0-4-2.6-7-7-7Z" />
+  <path id="left" d="M12 2C7.6 2 5 5 5 9v1h7V2Z" />
+  <path id="right" d="M12 2c4.4 0 7 3 7 7v1h-7V2Z" />
+  <path id="divider" d="M5 10h14M12 2v8" />
+  <path id="wheel" d="M12 3.5c-.9 0-1.5.6-1.5 1.5v3c0 .9.6 1.5 1.5 1.5s1.5-.6 1.5-1.5V5c0-.9-.6-1.5-1.5-1.5Z" />
+  <path id="scroll-up" d="M9 16l3-3 3 3M12 13v6" display="none" />
+  <path id="scroll-down" d="M9 16l3 3 3-3M12 13v6" display="none" />
+</svg>

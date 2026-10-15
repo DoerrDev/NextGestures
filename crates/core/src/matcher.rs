@@ -14,6 +14,7 @@ pub struct Input<'a> {
     pub button: Option<TriggerButton>,
     pub region: Option<Region>,
     pub wheel: &'a [WheelDir],
+    pub left_click: bool,
     /// 归一化后的轨迹；没有画轨迹时为 None
     pub stroke: Option<&'a [Point]>,
 }
@@ -40,6 +41,15 @@ fn matches_exe(p: &Profile, exe: &str) -> bool {
     !p.is_global() && p.exe.eq_ignore_ascii_case(exe)
 }
 
+/// 在会话结束前，用户仍可把右键轨迹追加为左键组合，需延后立即执行。
+pub fn requires_release(cfg: &Config, exe: &str, button: Option<TriggerButton>) -> bool {
+    button == Some(TriggerButton::Right) && cfg.profiles.iter().any(|p| {
+        (p.is_global() || matches_exe(p, exe)) && p.gestures.iter().any(|g| {
+            g.enabled && g.trigger == Some(TriggerButton::Right) && g.left_click
+        })
+    })
+}
+
 /// 指定了边角的手势优先于不限边角的同轨迹手势
 fn best_of<'a, I: Iterator<Item = &'a Profile>>(
     profiles: I,
@@ -49,7 +59,8 @@ fn best_of<'a, I: Iterator<Item = &'a Profile>>(
     let mut best: Option<(bool, Matched<'a>)> = None;
     for p in profiles {
         for g in &p.gestures {
-            if !g.enabled || g.trigger != input.button || g.wheel != input.wheel {
+            if !g.enabled || g.trigger != input.button || g.wheel != input.wheel
+                || g.left_click != input.left_click {
                 continue;
             }
             if g.region.is_some() && g.region != input.region {
@@ -86,6 +97,7 @@ mod tests {
             trigger: Some(TriggerButton::Right),
             region: None,
             wheel: vec![],
+            left_click: false,
             fire_mode: FireMode::OnRelease,
             points,
             times: vec![],
@@ -94,7 +106,7 @@ mod tests {
     }
 
     fn input(button: TriggerButton, stroke: &[Point]) -> Input<'_> {
-        Input { button: Some(button), region: None, wheel: &[], stroke: Some(stroke) }
+        Input { button: Some(button), region: None, wheel: &[], left_click: false, stroke: Some(stroke) }
     }
 
     fn line(from: Point, to: Point) -> Vec<Point> {
@@ -153,6 +165,34 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_click_is_an_independent_gesture() {
+        let (mut cfg, stroke) = cfg_with_app();
+        let plain = input(TriggerButton::Right, &stroke);
+        let clicked = Input { left_click: true, ..plain };
+        assert!(best(&cfg, "photoshop.exe", clicked).is_none());
+        let mut combo = gesture("clicked", stroke.clone());
+        combo.left_click = true;
+        cfg.profile_mut("global").unwrap().gestures.push(combo);
+        assert_eq!(best(&cfg, "photoshop.exe", plain).unwrap().gesture.id, "ps-right");
+        assert_eq!(best(&cfg, "photoshop.exe", clicked).unwrap().gesture.id, "clicked");
+        cfg.profile_mut("global").unwrap().gestures.retain(|g| g.left_click);
+        assert!(best(&cfg, "explorer.exe", plain).is_none());
+    }
+
+    #[test]
+    fn only_applicable_enabled_combinations_delay_right_gestures() {
+        let (mut cfg, _) = cfg_with_app();
+        cfg.profile_mut("ps").unwrap().gestures[0].left_click = true;
+        assert!(requires_release(&cfg, "PhotoShop.EXE", Some(TriggerButton::Right)));
+        assert!(!requires_release(&cfg, "explorer.exe", Some(TriggerButton::Right)));
+        assert!(!requires_release(&cfg, "photoshop.exe", Some(TriggerButton::Middle)));
+        cfg.profile_mut("ps").unwrap().gestures[0].enabled = false;
+        assert!(!requires_release(&cfg, "photoshop.exe", Some(TriggerButton::Right)));
+        cfg.profile_mut("global").unwrap().gestures[0].left_click = true;
+        assert!(requires_release(&cfg, "explorer.exe", Some(TriggerButton::Right)));
+    }
+
+    #[test]
     fn below_threshold_is_no_match() {
         let (cfg, _) = cfg_with_app();
         let down = recognizer::normalize(&line([0.0, 0.0], [0.0, 200.0])).unwrap();
@@ -178,6 +218,7 @@ mod tests {
             button: Some(TriggerButton::Right),
             region: None,
             wheel: &[WheelDir::Up, WheelDir::Down],
+            left_click: false,
             stroke: None,
         };
         assert_eq!(best(&cfg, "explorer.exe", wheel).unwrap().gesture.id, "g-wheel");

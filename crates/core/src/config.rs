@@ -106,6 +106,9 @@ pub struct Gesture {
     /// 滚轮序列，可与轨迹组合，也可单独成为手势
     #[serde(default)]
     pub wheel: Vec<WheelDir>,
+    /// 右键轨迹终点按下左键，松开右键后识别；旧配置默认关闭
+    #[serde(default)]
+    pub left_click: bool,
     #[serde(default = "default_fire_mode")]
     pub fire_mode: FireMode,
     /// 归一化后的 64 个模板点；纯滚轮手势为空
@@ -290,6 +293,10 @@ impl Config {
 
     /// 覆盖式写入：存在同 id 则更新，否则追加
     pub fn upsert_gesture(&mut self, profile_id: &str, gesture: Gesture) -> Result<()> {
+        anyhow::ensure!(
+            !gesture.left_click || (gesture.trigger == Some(TriggerButton::Right) && !gesture.points.is_empty()),
+            "终点左键点击需要右键轨迹"
+        );
         let profile = self
             .profile_mut(profile_id)
             .with_context(|| format!("未找到配置组: {profile_id}"))?;
@@ -341,6 +348,7 @@ fn seed_global() -> Profile {
                 trigger: Some(TriggerButton::Right),
                 region: None,
                 wheel: vec![],
+                left_click: false,
                 fire_mode: FireMode::OnRelease,
                 points: recognizer::normalize(&shape_e()).unwrap_or_default(),
                 times: vec![],
@@ -354,6 +362,7 @@ fn seed_global() -> Profile {
                 trigger: Some(TriggerButton::Middle),
                 region: None,
                 wheel: vec![],
+                left_click: false,
                 fire_mode: FireMode::Immediate,
                 points: recognizer::normalize(&shape_o()).unwrap_or_default(),
                 times: vec![],
@@ -398,6 +407,32 @@ mod tests {
         assert_eq!(back.profiles[0].gestures.len(), 2);
         assert_eq!(back.profiles[0].gestures[0].points.len(), recognizer::NUM_POINTS);
         assert_eq!(back.settings.move_threshold, 20);
+    }
+
+    #[test]
+    fn endpoint_click_persists_and_old_configs_default_to_plain() {
+        let mut cfg = Config::default();
+        cfg.profiles[0].gestures[0].left_click = true;
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert!(back.profiles[0].gestures[0].left_click);
+        let old = text.lines().filter(|line| !line.starts_with("left_click ="))
+            .collect::<Vec<_>>().join("\n");
+        let back: Config = toml::from_str(&old).unwrap();
+        assert!(back.profiles[0].gestures.iter().all(|g| !g.left_click));
+    }
+
+    #[test]
+    fn endpoint_click_requires_right_stroke_when_saving() {
+        let mut cfg = Config::default();
+        let mut g = cfg.profiles[0].gestures[0].clone();
+        g.left_click = true;
+        assert!(cfg.upsert_gesture("global", g.clone()).is_ok());
+        g.trigger = Some(TriggerButton::Middle);
+        assert!(cfg.upsert_gesture("global", g.clone()).is_err());
+        g.trigger = Some(TriggerButton::Right);
+        g.points.clear();
+        assert!(cfg.upsert_gesture("global", g).is_err());
     }
 
     #[test]
