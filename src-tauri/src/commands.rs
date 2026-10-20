@@ -45,7 +45,10 @@ pub fn config_path(state: State<AppState>) -> String {
 #[tauri::command]
 pub fn save_settings(app: AppHandle, state: State<AppState>, settings: Settings) -> R<()> {
     state.config.write().unwrap().settings = settings;
-    commit(&app)
+    commit(&app)?;
+    // 「触发提示置顶」立即生效，不必等下一次手势
+    let _ = crate::overlay::apply_z_order(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -163,6 +166,7 @@ pub fn test_action(action: Action) -> R<()> {
 /// 设置页打开「触发提示」时向实际桌面 overlay 投送预览，不写入配置。
 #[tauri::command]
 pub fn show_gesture_hint_preview(app: AppHandle, hint: GestureHintPreview) {
+    let _ = crate::overlay::ensure(&app);
     let _ = app.emit_to(crate::overlay::LABEL, "gesture:hint-preview", hint);
 }
 

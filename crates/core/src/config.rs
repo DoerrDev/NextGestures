@@ -169,6 +169,9 @@ pub struct Settings {
     /// 相对屏幕中心的垂直偏移（CSS 像素）
     #[serde(default)]
     pub gesture_hint_offset_y: i32,
+    /// 触发提示（轨迹 / 手势名称）是否置顶显示在所有窗口之上
+    #[serde(default = "default_true")]
+    pub gesture_hint_topmost: bool,
     /// 开关手势的全局快捷键，如 ["ctrl", "alt", "g"]；空表示未设置
     #[serde(default)]
     pub toggle_hotkey: Vec<String>,
@@ -179,6 +182,10 @@ pub struct Settings {
     /// 提交反馈时使用的昵称
     #[serde(default)]
     pub feedback_nickname: String,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_api_base() -> String {
@@ -221,6 +228,7 @@ impl Default for Settings {
             gesture_hint_color: default_gesture_hint_color(),
             gesture_hint_offset_x: 0,
             gesture_hint_offset_y: 0,
+            gesture_hint_topmost: true,
             toggle_hotkey: vec![],
             language: "zh-CN".into(),
             api_base: default_api_base(),

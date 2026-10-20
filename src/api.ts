@@ -59,6 +59,7 @@ export interface Settings {
   gesture_hint_color: string
   gesture_hint_offset_x: number
   gesture_hint_offset_y: number
+  gesture_hint_topmost: boolean
   toggle_hotkey: string[]
   language: string
   api_base: string

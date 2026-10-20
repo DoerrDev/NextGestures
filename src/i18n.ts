@@ -48,7 +48,7 @@ const zhCN = {
   record: '点击开始录制',
   recording: '录制中…按住触发键画轨迹 / 滚滚轮，右键轨迹可在终点点击左键，松开结束；边角滚轮停顿 0.3 秒结束',
   reRecord: '重新录制',
-  recordHint: '按住触发键画轨迹或滚动滚轮后松开；右键轨迹可在终点追加左键点击；也可在屏幕边角滚动滚轮',
+  recordHint: '按住触发键画轨迹或滚动滚轮后松开；右键画完轨迹后在终点按一下左键再松开右键，即录为终点左键点击；也可在屏幕边角滚动滚轮',
   noStroke: '还没有轨迹',
   action: '动作',
   actionKind: '动作类型',
@@ -81,9 +81,7 @@ const zhCN = {
   regionWheelOnly: '边角手势只支持滚轮，请重新录制',
   wheel: '滚轮',
   leftClick: '终点左键点击',
-  leftClickHelp: '查看终点左键点击说明',
-  leftClickShortHint: '右键画轨迹 → 左键点击 → 松开右键',
-  leftClickHint: '按住右键画轨迹，在终点按下左键，最后松开右键。左键按下后固定终点；当前程序有启用的组合手势时，右键手势统一等到松开后执行。',
+  leftClickFireNote: '录制的轨迹含终点左键点击，松开右键后执行',
   regionTopLeft: '左上角',
   regionTop: '上边',
   regionTopRight: '右上角',
@@ -145,6 +143,7 @@ const zhCN = {
   hintOffsetY: '垂直位置 Y (px)',
   hintScreenSize: '当前虚拟桌面：',
   hintOffsetHelp: '以屏幕中心为原点；X 正数向右，Y 正数向下。',
+  hintTopmost: '置顶显示（显示在所有窗口最上层，不被其他窗口遮挡）',
   settings: '设置',
   configPath: '配置文件',
   autostart: '开机自启动',
@@ -156,6 +155,7 @@ const zhCN = {
   updateLater: '稍后',
   updateDownloading: '下载安装中…',
   updateFailed: '更新失败：',
+  updateHint: '发现新版本，点击查看',
 }
 
 const dicts = { 'zh-CN': zhCN }

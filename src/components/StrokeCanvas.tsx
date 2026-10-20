@@ -44,6 +44,12 @@ const WHEEL_STEP_MS = 500
 const CLICK_PAUSE_MS = 180
 const CLICK_PRESS_MS = 220
 const CLICK_RELEASE_MS = 180
+/**
+ * 轨迹回放时长区间：录得太快的轨迹整体放慢到至少 STROKE_MIN_MS，
+ * 过长的轨迹压缩到 STROKE_MAX_MS；区间内保持原速。没有时间戳的旧配置也按 STROKE_MIN_MS 匀速演示。
+ */
+const STROKE_MIN_MS = 1200
+const STROKE_MAX_MS = 4000
 const MARK = '#5a5a5a'
 
 /** 回放轨迹，并通过鼠标 SVG 展示按键、滚轮方向和终点点击。 */
@@ -118,10 +124,17 @@ export function StrokeCanvas({
     }
 
     // 旧配置没有时间戳时，组合手势也能依次演示轨迹、滚轮和终点点击。
+    // 录制时间轴按同一倍率缩放到 [STROKE_MIN_MS, STROKE_MAX_MS]，保留各点之间的相对节奏。
+    const recorded = !live && hasStroke && times && times.length === points.length
+      ? times[times.length - 1] - times[0]
+      : 0
     const anim = !live && hasStroke
-      ? times && times.length === points.length && times[times.length - 1] > 0
-        ? times
-        : leftClick || wheel.length > 0 ? points.map((_, i) => (i / (points.length - 1)) * 1200) : null
+      ? recorded > 0
+        ? (() => {
+            const k = Math.min(STROKE_MAX_MS, Math.max(STROKE_MIN_MS, recorded)) / recorded
+            return times!.map((v) => (v - times![0]) * k)
+          })()
+        : leftClick || wheel.length > 0 ? points.map((_, i) => (i / (points.length - 1)) * STROKE_MIN_MS) : null
       : null
     const strokeTotal = anim ? anim[anim.length - 1] : 0
     const wheelTotal = live ? 0 : wheel.length * WHEEL_STEP_MS

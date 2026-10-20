@@ -308,6 +308,15 @@ export function SettingsDialog({ initial, configPath, unread, onSave, onClose }:
 
             {tab === 'hint' && (
               <>
+                <label className="check field">
+                  <input
+                    type="checkbox"
+                    checked={s.gesture_hint_topmost}
+                    onChange={(e) => setS({ ...s, gesture_hint_topmost: e.target.checked })}
+                  />
+                  {t('hintTopmost')}
+                </label>
+
                 <div className="field">
                   <label htmlFor="s-hint-size">{t('hintFontSize')}</label>
                   <div className="range-row">

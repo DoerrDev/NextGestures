@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
+import { getVersion } from '@tauri-apps/api/app'
 import { check, type Update } from '@tauri-apps/plugin-updater'
 import {
   AppWindow,
@@ -57,6 +58,8 @@ export function App() {
   const [toast, setToast] = useState('')
   const [confirmRemove, setConfirmRemove] = useState<Profile | null>(null)
   const [update, setUpdate] = useState<Update | null>(null)
+  const [updateOpen, setUpdateOpen] = useState(false)
+  const [version, setVersion] = useState('')
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
   const [menuId, setMenuId] = useState('')
@@ -119,6 +122,9 @@ export function App() {
   }, [reload])
 
   useEffect(() => {
+    getVersion()
+      .then(setVersion)
+      .catch((e) => console.error('获取版本号失败', e))
     check()
       .then((u) => u && setUpdate(u))
       .catch((e) => console.error('检查更新失败', e))
@@ -211,6 +217,18 @@ export function App() {
           <Spline size={22} strokeWidth={2} />
           {t('appName')}
         </div>
+        {version && (
+          <button
+            type="button"
+            className={update ? 'version-tag has-update' : 'version-tag'}
+            title={update ? `${t('updateHint')} v${update.version}` : t('updateCurrent')}
+            disabled={!update}
+            onClick={() => setUpdateOpen(true)}
+          >
+            v{version}
+            {update && <span className="dot" />}
+          </button>
+        )}
         <div className="topbar-right">
           <button
             type="button"
@@ -667,7 +685,7 @@ export function App() {
           {toast}
         </div>
       )}
-      {update && <UpdateDialog update={update} onClose={() => setUpdate(null)} />}
+      {update && updateOpen && <UpdateDialog update={update} onClose={() => setUpdateOpen(false)} />}
     </div>
   )
 }

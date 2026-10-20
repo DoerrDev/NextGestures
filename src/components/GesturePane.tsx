@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import {
   Check,
-  CircleHelp,
   MousePointerClick,
   Power,
   PowerOff,
@@ -217,32 +216,12 @@ export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelet
               <option value="OnRelease">{t('onRelease')}</option>
               <option value="Immediate">{t('immediate')}</option>
             </select>
+            {draft.left_click && (
+              <p className="field-note" style={{ marginTop: 6 }}>
+                {t('leftClickFireNote')}
+              </p>
+            )}
           </div>
-        </div>
-
-        <div className="field">
-          <div className="gesture-option">
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={draft.left_click ?? false}
-                disabled={recording || draft.trigger !== 'Right' || draft.points.length === 0}
-                onChange={(e) => setDraft({
-                  ...draft,
-                  left_click: e.target.checked,
-                  fire_mode: e.target.checked ? 'OnRelease' : draft.fire_mode,
-                })}
-              />
-              {' '}{t('leftClick')}
-            </label>
-            <details className="gesture-help">
-              <summary aria-label={t('leftClickHelp')}>
-                <CircleHelp size={15} aria-hidden="true" />
-              </summary>
-              <p>{t('leftClickHint')}</p>
-            </details>
-          </div>
-          <p className="field-note gesture-option-note">{t('leftClickShortHint')}</p>
         </div>
 
         <h3 className="pane-sect">{t('action')}</h3>
