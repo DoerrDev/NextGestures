@@ -4,6 +4,7 @@ import { getVersion } from '@tauri-apps/api/app'
 import { check, type Update } from '@tauri-apps/plugin-updater'
 import {
   AppWindow,
+  Ban,
   Copy,
   Globe,
   LayoutGrid,
@@ -35,6 +36,7 @@ import { describeAction } from './components/ActionEditor'
 import { GesturePane } from './components/GesturePane'
 import { ProfileDialog } from './components/ProfileDialog'
 import { SettingsDialog } from './components/SettingsDialog'
+import { BlacklistDialog } from './components/BlacklistDialog'
 import { StrokeCanvas } from './components/StrokeCanvas'
 import { UpdateDialog } from './components/UpdateDialog'
 
@@ -55,6 +57,7 @@ export function App() {
   const [editing, setEditing] = useState<{ gesture: Gesture; isNew: boolean } | null>(null)
   const [profileOpen, setProfileOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [blacklistOpen, setBlacklistOpen] = useState(false)
   const [unread, setUnread] = useState(0)
   const [enabled, setEnabled] = useState(true)
   const [toast, setToast] = useState('')
@@ -147,6 +150,13 @@ export function App() {
   if (!config || !active) return null
 
   const onCount = active.gestures.filter((g) => g.enabled).length
+  const blacklist = config.settings.blacklist ?? []
+  const isBlacklisted = (exe: string) => !!exe && blacklist.some((name) => name.trim().toLowerCase() === exe.toLowerCase())
+  const activeBlocked = isBlacklisted(active.exe)
+  const saveBlacklist = async (names: string[]) => {
+    await api.saveBlacklist(names)
+    await reload()
+  }
   const offCount = active.gestures.length - onCount
 
   const needle = query.trim().toLowerCase()
@@ -293,6 +303,7 @@ export function App() {
                 <Globe size={15} strokeWidth={2} className="prof-icon" />
               )}
               <span>{p.exe ? p.name : t('global')}</span>
+              {isBlacklisted(p.exe) && <Ban size={14} className="prof-icon" aria-label={t('blacklistBlocked')} />}
               <small>{p.gestures.length}</small>
               {p.exe && (
                 <button
@@ -313,12 +324,30 @@ export function App() {
             <Plus size={15} strokeWidth={2} />
             {t('addProfile')}
           </button>
+          <div className="side-blacklist">
+            <button type="button" className="prof" onClick={() => setBlacklistOpen(true)}>
+              <Ban size={16} className="prof-icon" />
+              <span>{t('tabBlacklist')}</span>
+              <small>{blacklist.length}</small>
+            </button>
+            <p>{t('blacklistSidebarHint')}</p>
+          </div>
         </aside>
 
         <main className="main">
           <div className="head">
             <h1>{t('gestureList')}</h1>
             <p className="subtitle">{active.exe || t('globalHint')}</p>
+            {active.exe && (
+              <button type="button" className="btn-outline subtle" onClick={() => void guard(async () => {
+                await api.saveBlacklist(activeBlocked
+                  ? blacklist.filter((name) => name.trim().toLowerCase() !== active.exe.toLowerCase())
+                  : [...blacklist, active.exe])
+                flash(activeBlocked ? t('blacklistRemoved') : t('blacklistAdded'))
+              })}>
+                <Ban size={14} />{activeBlocked ? t('blacklistRestore') : t('blacklistBlockApp')}
+              </button>
+            )}
 
             <div className="search">
               <Search size={14} strokeWidth={2} />
@@ -374,6 +403,11 @@ export function App() {
             </button>
           </div>
 
+          {activeBlocked && (
+            <div className="blacklist-status" role="status">
+              <Ban size={14} /> {t('blacklistBlockedHint')}
+            </div>
+          )}
           {conflicts.pairs.length > 0 && (
             <div className="alert">
               <TriangleAlert size={16} strokeWidth={2} />
@@ -689,6 +723,9 @@ export function App() {
           onSave={saveSettings}
           onClose={() => setSettingsOpen(false)}
         />
+      )}
+      {blacklistOpen && (
+        <BlacklistDialog names={blacklist} onChange={saveBlacklist} onClose={() => setBlacklistOpen(false)} />
       )}
       {confirmRemove && (
         <div className="mask" onMouseDown={(e) => e.target === e.currentTarget && setConfirmRemove(null)}>

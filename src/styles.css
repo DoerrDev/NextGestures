@@ -398,6 +398,60 @@ textarea {
   align-items: start;
 }
 
+.blacklist-help {
+  color: var(--color-pencil-gray);
+  font-size: var(--text-caption);
+  line-height: 1.6;
+  margin: 0 0 16px;
+}
+
+.blacklist-input, .blacklist-pick {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.blacklist-input input { min-width: 0; flex: 1; }
+.blacklist-input button { flex-shrink: 0; }
+
+.blacklist-list {
+  list-style: none;
+  padding: 0;
+  margin: 16px 0;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.blacklist-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--color-pencil-gray);
+}
+
+.blacklist-list span { overflow-wrap: anywhere; min-width: 0; }
+
+.blacklist-status {
+  padding: 8px 12px;
+  border: 1px solid var(--color-charcoal-ink);
+  background: var(--color-mint-sketch);
+  font-size: var(--text-caption);
+}
+
+.side-blacklist {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--color-charcoal-ink);
+}
+
+.side-blacklist p {
+  margin: 8px 0 0;
+  color: var(--color-pencil-gray);
+  font-size: var(--text-caption);
+}
+
 .tabs {
   display: flex;
   flex-direction: column;

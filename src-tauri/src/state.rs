@@ -51,6 +51,7 @@ impl AppState {
     /// 把触发键掩码和距离阈值同步给钩子线程
     pub fn push_to_hook(&self) {
         let cfg = self.config.read().unwrap();
+        hook::set_blacklist(cfg.settings.blacklist.clone());
         if !self.recording.load(Relaxed) {
             hook::set_trigger_mask(cfg.trigger_mask());
             hook::set_region_mask(cfg.region_mask());

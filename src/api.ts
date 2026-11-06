@@ -46,6 +46,7 @@ export interface Profile {
 }
 
 export interface Settings {
+  blacklist: string[]
   trigger_buttons: TriggerButton[]
   move_threshold: number
   match_threshold: number
@@ -102,6 +103,7 @@ export const api = {
   getConfig: () => invoke<Config>('get_config'),
   configPath: () => invoke<string>('config_path'),
   saveSettings: (settings: Settings) => invoke<void>('save_settings', { settings }),
+  saveBlacklist: (names: string[]) => invoke<void>('save_blacklist', { names }),
   upsertGesture: (profileId: string, gesture: Gesture) =>
     invoke<void>('upsert_gesture', { profileId, gesture }),
   removeGesture: (profileId: string, gestureId: string) =>
@@ -113,6 +115,7 @@ export const api = {
   startRecording: () => invoke<void>('start_recording'),
   cancelRecording: () => invoke<void>('cancel_recording'),
   beginPick: () => invoke<void>('begin_pick'),
+  cancelPick: () => invoke<void>('cancel_pick'),
   setEnabled: (enabled: boolean) => invoke<void>('set_enabled', { enabled }),
   isEnabled: () => invoke<boolean>('is_enabled'),
   foregroundExe: () => invoke<string>('foreground_exe'),

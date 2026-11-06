@@ -43,12 +43,24 @@ pub fn config_path(state: State<AppState>) -> String {
 }
 
 #[tauri::command]
-pub fn save_settings(app: AppHandle, state: State<AppState>, settings: Settings) -> R<()> {
-    state.config.write().unwrap().settings = settings;
+pub fn save_settings(app: AppHandle, state: State<AppState>, mut settings: Settings) -> R<()> {
+    {
+        let mut cfg = state.config.write().unwrap();
+        // 黑名单独立即时保存，避免旧设置快照把名单覆盖回去。
+        settings.blacklist = cfg.settings.blacklist.clone();
+        cfg.settings = settings;
+    }
     commit(&app)?;
     // 「触发提示置顶」立即生效，不必等下一次手势
     let _ = crate::overlay::apply_z_order(&app);
     Ok(())
+}
+
+#[tauri::command]
+pub fn save_blacklist(app: AppHandle, state: State<AppState>, names: Vec<String>) -> R<()> {
+    state.config.write().unwrap().settings.set_blacklist(names).map_err(err)?;
+    commit(&app)?;
+    app.emit("config:changed", ()).map_err(err)
 }
 
 #[tauri::command]
@@ -135,6 +147,11 @@ pub fn cancel_recording(state: State<AppState>) {
 #[tauri::command]
 pub fn begin_pick() {
     hook::begin_pick();
+}
+
+#[tauri::command]
+pub fn cancel_pick() {
+    hook::cancel_pick();
 }
 
 #[tauri::command]

@@ -140,6 +140,9 @@ impl Profile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
+    /// 按进程名停用全部手势；旧配置默认为空。
+    #[serde(default)]
+    pub blacklist: Vec<String>,
     pub trigger_buttons: Vec<TriggerButton>,
     /// 进入手势态的最小移动距离（像素）
     pub move_threshold: i32,
@@ -212,9 +215,33 @@ fn default_gesture_hint_color() -> String {
     "#ffffff".into()
 }
 
+impl Settings {
+    pub fn set_blacklist(&mut self, names: Vec<String>) -> Result<()> {
+        let mut normalized = Vec::new();
+        for name in names {
+            let name = name.trim().to_ascii_lowercase();
+            anyhow::ensure!(
+                name.ends_with(".exe") && name.len() > 4
+                    && !name.chars().any(|c| c.is_control() || "\\/:*?\"<>|".contains(c)),
+                "请输入进程文件名，例如 chrome.exe"
+            );
+            if !normalized.contains(&name) {
+                normalized.push(name);
+            }
+        }
+        self.blacklist = normalized;
+        Ok(())
+    }
+
+    pub fn is_blacklisted(&self, exe: &str) -> bool {
+        !exe.is_empty() && self.blacklist.iter().any(|name| name.trim().eq_ignore_ascii_case(exe))
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            blacklist: vec![],
             trigger_buttons: vec![TriggerButton::Right, TriggerButton::Middle],
             move_threshold: 20,
             match_threshold: 0.80,
@@ -415,6 +442,33 @@ mod tests {
         assert_eq!(back.profiles[0].gestures.len(), 2);
         assert_eq!(back.profiles[0].gestures[0].points.len(), recognizer::NUM_POINTS);
         assert_eq!(back.settings.move_threshold, 20);
+    }
+
+    #[test]
+    fn blacklist_persists_and_old_settings_default_to_empty() {
+        let mut settings = Settings::default();
+        settings.blacklist = vec!["Chrome.EXE".into(), " msedge.exe ".into()];
+        let text = toml::to_string_pretty(&settings).unwrap();
+        let back: Settings = toml::from_str(&text).unwrap();
+        assert!(back.is_blacklisted("chrome.exe"));
+        assert!(back.is_blacklisted("MSEDGE.EXE"));
+        assert!(!back.is_blacklisted("mychrome.exe"));
+        assert!(!back.is_blacklisted(""));
+        let mut old: toml::Value = toml::from_str(&text).unwrap();
+        old.as_table_mut().unwrap().remove("blacklist");
+        let back: Settings = old.try_into().unwrap();
+        assert!(back.blacklist.is_empty());
+    }
+
+    #[test]
+    fn blacklist_normalizes_and_rejects_paths_without_changing_previous_list() {
+        let mut settings = Settings::default();
+        settings.set_blacklist(vec![" Chrome.EXE ".into(), "chrome.exe".into(), "Some Browser.exe".into()]).unwrap();
+        assert_eq!(settings.blacklist, vec!["chrome.exe", "some browser.exe"]);
+        for name in ["C:\\chrome.exe", "chrome", "", ".exe", "chrome?.exe"] {
+            assert!(settings.set_blacklist(vec![name.into()]).is_err());
+            assert_eq!(settings.blacklist, vec!["chrome.exe", "some browser.exe"]);
+        }
     }
 
     #[test]

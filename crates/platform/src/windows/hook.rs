@@ -88,6 +88,10 @@ pub fn set_enabled(on: bool) {
     ENABLED.store(on, Relaxed);
 }
 
+pub fn set_blacklist(names: Vec<String>) {
+    super::blacklist::replace(names);
+}
+
 pub fn is_enabled() -> bool {
     ENABLED.load(Relaxed)
 }
@@ -97,6 +101,13 @@ pub fn begin_pick() {
     PICKING.store(true, Relaxed);
     PICK_LAST_HWND.store(0, Relaxed);
     super::window::set_pick_cursor();
+}
+
+pub fn cancel_pick() {
+    if PICKING.swap(false, Relaxed) {
+        PICK_LAST_HWND.store(0, Relaxed);
+        super::window::restore_cursor();
+    }
 }
 
 pub fn take_wheel() -> i32 {
@@ -151,6 +162,8 @@ enum Phase {
 }
 
 struct HookState {
+    /// 黑名单窗口中开始的按键序列始终原样放行，直到对应按键松开。
+    bypass_button: Option<TriggerButton>,
     phase: Phase,
     /// None 表示无按键的边角手势
     button: Option<TriggerButton>,
@@ -175,6 +188,7 @@ struct HookState {
 thread_local! {
     static STATE: RefCell<HookState> = const {
         RefCell::new(HookState {
+            bypass_button: None,
             phase: Phase::Idle,
             button: None,
             region: None,
@@ -261,6 +275,25 @@ fn on_idle(st: &mut HookState) {
 
 fn handle(st: &mut HookState, msg: u32, ms: &MSLLHOOKSTRUCT) -> bool {
     let pt = (ms.pt.x, ms.pt.y);
+    handle_with_blacklist(st, msg, ms, || {
+        // 普通滚动、未启用的触发键和总开关关闭时不需要查询目标窗口。
+        ENABLED.load(Relaxed)
+            && super::blacklist::active()
+            && match button_of(msg, ms) {
+                Some((button, true)) => TRIGGER_MASK.load(Relaxed) & button.bit() != 0,
+                _ => msg == WM_MOUSEWHEEL && edge_region(pt).is_some(),
+            }
+            && super::blacklist::foreground()
+    })
+}
+
+fn handle_with_blacklist(
+    st: &mut HookState,
+    msg: u32,
+    ms: &MSLLHOOKSTRUCT,
+    blacklisted: impl FnOnce() -> bool,
+) -> bool {
+    let pt = (ms.pt.x, ms.pt.y);
 
     if msg == WM_LBUTTONUP && st.swallowed_left_down {
         st.swallowed_left_down = false;
@@ -287,6 +320,22 @@ fn handle(st: &mut HookState, msg: u32, ms: &MSLLHOOKSTRUCT) -> bool {
             }
             _ => return false,
         }
+    }
+
+    if let Some(button) = st.bypass_button {
+        if button_of(msg, ms) == Some((button, false)) {
+            st.bypass_button = None;
+        }
+        return false;
+    }
+
+    // 在吞掉任何触发事件之前决定是否放行；整段原生手势保留给目标程序。
+    if st.phase == Phase::Idle
+        && (msg == WM_MOUSEWHEEL || button_of(msg, ms).is_some_and(|(_, down)| down))
+        && blacklisted()
+    {
+        st.bypass_button = button_of(msg, ms).map(|(button, _)| button);
+        return false;
     }
 
     if msg == WM_MOUSEWHEEL {
@@ -427,6 +476,7 @@ mod tests {
 
     fn state(button: TriggerButton) -> HookState {
         let mut st = HookState {
+            bypass_button: None,
             phase: Phase::Idle, button: None, region: None, start: (0, 0),
             moved: false, points: vec![], times: vec![], wheel: vec![], wheel_acc: 0,
             last_wheel: None, left_click: false, swallowed_left_down: false,
@@ -440,6 +490,39 @@ mod tests {
             pt: POINT { x, y: 0 }, time: x as u32,
             ..Default::default()
         })
+    }
+
+    #[test]
+    fn blacklisted_buttons_pass_entire_native_sequence_even_after_focus_changes() {
+        for (down, up, data) in [
+            (WM_RBUTTONDOWN, WM_RBUTTONUP, 0),
+            (WM_MBUTTONDOWN, WM_MBUTTONUP, 0),
+            (WM_XBUTTONDOWN, WM_XBUTTONUP, 1 << 16),
+            (WM_XBUTTONDOWN, WM_XBUTTONUP, 2 << 16),
+        ] {
+            let mut st = state(TriggerButton::Right);
+            reset(&mut st);
+            let ms = MSLLHOOKSTRUCT { mouseData: data, ..Default::default() };
+            assert!(!handle_with_blacklist(&mut st, down, &ms, || true));
+            assert!(st.bypass_button.is_some());
+            for msg in [WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_LBUTTONDOWN, WM_LBUTTONUP, up] {
+                assert!(!handle_with_blacklist(&mut st, msg, &ms, || panic!("sequence must stay native")));
+                assert_eq!(st.phase, Phase::Idle);
+            }
+            assert!(st.bypass_button.is_none());
+        }
+    }
+
+    #[test]
+    fn blacklisted_corner_wheel_passes_without_starting_a_session() {
+        let mut st = state(TriggerButton::Right);
+        reset(&mut st);
+        let ms = MSLLHOOKSTRUCT { mouseData: 120 << 16, ..Default::default() };
+        for _ in 0..3 {
+            assert!(!handle_with_blacklist(&mut st, WM_MOUSEWHEEL, &ms, || true));
+            assert_eq!(st.phase, Phase::Idle);
+            assert!(st.wheel.is_empty());
+        }
     }
 
     #[test]

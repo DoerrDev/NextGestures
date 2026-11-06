@@ -31,6 +31,9 @@ pub fn best_above<'a>(
     input: Input<'_>,
     threshold: f32,
 ) -> Option<Matched<'a>> {
+    if cfg.settings.is_blacklisted(exe) {
+        return None;
+    }
     let app = cfg.profiles.iter().filter(|p| matches_exe(p, exe));
     let global = cfg.profiles.iter().filter(|p| p.is_global());
 
@@ -141,6 +144,18 @@ mod tests {
         let (cfg, stroke) = cfg_with_app();
         let m = best(&cfg, "PhotoShop.EXE", input(TriggerButton::Right, &stroke)).unwrap();
         assert_eq!(m.gesture.id, "ps-right");
+    }
+
+    #[test]
+    fn blacklist_overrides_app_and_global_gestures() {
+        let (mut cfg, stroke) = cfg_with_app();
+        cfg.settings.blacklist = vec!["PHOTOSHOP.EXE".into(), "explorer.exe".into()];
+        let input = input(TriggerButton::Right, &stroke);
+        assert!(best(&cfg, "photoshop.exe", input).is_none());
+        assert!(best_above(&cfg, "explorer.exe", input, 0.0).is_none());
+        assert!(best(&cfg, "other.exe", input).is_some());
+        cfg.settings.blacklist.clear();
+        assert_eq!(best(&cfg, "photoshop.exe", input).unwrap().gesture.id, "ps-right");
     }
 
     #[test]

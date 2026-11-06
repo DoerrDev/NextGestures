@@ -53,6 +53,11 @@ pub fn root_hwnd_at(pt: (i32, i32)) -> isize {
     target.0 as isize
 }
 
+/// 不加载图标和标题，仅查询鼠标目标窗口的进程（包括未激活窗口）。
+pub fn exe_at_point(pt: (i32, i32)) -> String {
+    exe_of_hwnd(HWND(root_hwnd_at(pt) as *mut std::ffi::c_void))
+}
+
 /// 准心拾取：返回坐标处顶层窗口的完整信息（exe/路径/标题/图标）。
 /// 指向本进程自己的窗口时返回 `None`。
 pub fn window_info_from_point(pt: (i32, i32)) -> Option<WindowInfo> {
