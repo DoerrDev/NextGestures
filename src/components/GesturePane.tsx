@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import {
   Check,
+  Copy,
   MousePointerClick,
   Power,
   PowerOff,
@@ -30,6 +31,8 @@ interface Props {
   onClose: () => void
   onToggle: (gesture: Gesture) => void
   onDelete: (gesture: Gesture) => void
+  /** 以当前面板内容为模板新建手势 */
+  onDuplicate: (gesture: Gesture) => void
 }
 
 const TRIGGER_LABEL: Record<string, string> = {
@@ -39,7 +42,7 @@ const TRIGGER_LABEL: Record<string, string> = {
   X2: '侧键 2',
 }
 
-export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelete }: Props) {
+export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelete, onDuplicate }: Props) {
   const [draft, setDraft] = useState<Gesture>(initial)
   const [recording, setRecording] = useState(false)
   const [live, setLive] = useState<LivePayload | null>(null)
@@ -255,6 +258,15 @@ export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelet
             >
               <Trash2 size={14} strokeWidth={2} />
               {t('remove')}
+            </button>
+            <button
+              type="button"
+              className="btn-ghost"
+              title={t('duplicate')}
+              onClick={() => onDuplicate({ ...draft, name: draft.name.trim() })}
+            >
+              <Copy size={14} strokeWidth={2} />
+              {t('duplicate')}
             </button>
           </>
         )}

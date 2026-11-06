@@ -4,6 +4,7 @@ import { getVersion } from '@tauri-apps/api/app'
 import { check, type Update } from '@tauri-apps/plugin-updater'
 import {
   AppWindow,
+  Copy,
   Globe,
   LayoutGrid,
   List,
@@ -21,6 +22,7 @@ import {
 } from 'lucide-react'
 import {
   api,
+  cloneGesture,
   emptyGesture,
   type Config,
   type Gesture,
@@ -193,6 +195,11 @@ export function App() {
   const addGesture = () => {
     switchView('list')
     setEditing({ gesture: emptyGesture(), isNew: true })
+  }
+
+  const duplicateGesture = (g: Gesture) => {
+    switchView('list')
+    setEditing({ gesture: cloneGesture(g, t('copySuffix')), isNew: true })
   }
 
   const editGesture = (g: Gesture) => {
@@ -451,6 +458,17 @@ export function App() {
                         </button>
                         <button
                           type="button"
+                          className="btn-ghost"
+                          title={t('duplicate')}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            duplicateGesture(g)
+                          }}
+                        >
+                          <Copy size={14} strokeWidth={2} />
+                        </button>
+                        <button
+                          type="button"
                           className="btn-ghost danger"
                           disabled={!g.deletable}
                           title={g.deletable ? t('remove') : t('notDeletable')}
@@ -468,7 +486,20 @@ export function App() {
 
                   {editing?.isNew && (
                     <div className="row draft sel">
-                      <span className="rthumb pending">{t('notRecorded')}</span>
+                      {editing.gesture.points.length > 0 || editing.gesture.wheel.length > 0 ? (
+                        <StrokeCanvas
+                          className="rthumb"
+                          points={editing.gesture.points}
+                          trigger={editing.gesture.trigger}
+                          leftClick={editing.gesture.left_click}
+                          region={editing.gesture.region}
+                          wheel={editing.gesture.wheel}
+                          color={config.settings.trail_color}
+                          width={2.5}
+                        />
+                      ) : (
+                        <span className="rthumb pending">{t('notRecorded')}</span>
+                      )}
                       <div className="rname">{editing.gesture.name || t('untitled')}</div>
                       <div className="rtags">
                         <span className="tag warn">{t('draftFlag')}</span>
@@ -490,11 +521,12 @@ export function App() {
 
               {editing ? (
                 <GesturePane
-                  key={editing.isNew ? 'new' : editing.gesture.id}
+                  key={`${editing.isNew ? 'new' : 'edit'}:${editing.gesture.id}`}
                   initial={editing.gesture}
                   isNew={editing.isNew}
                   onSave={saveGesture}
                   onClose={() => setEditing(null)}
+                  onDuplicate={duplicateGesture}
                   onToggle={(g) =>
                     void guard(() => api.setGestureEnabled(active.id, g.id, !g.enabled))
                   }
@@ -567,6 +599,16 @@ export function App() {
                         <>
                           <div className="card-menu-mask" onClick={() => setMenuId('')} />
                           <div className="card-menu">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setMenuId('')
+                                duplicateGesture(g)
+                              }}
+                            >
+                              <Copy size={13} strokeWidth={2} />
+                              {t('duplicate')}
+                            </button>
                             <button
                               type="button"
                               className="danger"

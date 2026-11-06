@@ -961,6 +961,7 @@ textarea {
   text-transform: uppercase;
   color: var(--color-charcoal-ink);
   text-align: left;
+  white-space: nowrap;
 }
 
 .card-menu button.danger {
@@ -1319,7 +1320,7 @@ body.resizing {
 .rows-head,
 .rows .row {
   display: grid;
-  grid-template-columns: 68px minmax(110px, 1fr) 150px minmax(140px, 1.4fr) 76px;
+  grid-template-columns: 68px minmax(110px, 1fr) 150px minmax(140px, 1.4fr) 108px;
   align-items: center;
   gap: var(--spacing-12);
   padding: 0 var(--spacing-12);

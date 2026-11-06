@@ -187,3 +187,14 @@ export function emptyGesture(trigger: TriggerButton = 'Right'): Gesture {
     action: { kind: 'none' },
   }
 }
+
+/** 以已有手势为模板复制出一个新手势草稿：新 id、可删除，其余数据（轨迹、触发、动作）原样保留 */
+export function cloneGesture(src: Gesture, suffix: string): Gesture {
+  return {
+    ...structuredClone(src),
+    id: newId(),
+    name: src.name ? `${src.name} ${suffix}` : '',
+    enabled: true,
+    deletable: true,
+  }
+}

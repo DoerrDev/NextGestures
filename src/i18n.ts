@@ -12,6 +12,8 @@ const zhCN = {
   addGesture: '新增手势',
   drawNew: '绘制新手势',
   editGesture: '编辑手势',
+  duplicate: '复制为新手势',
+  copySuffix: '副本',
   noGesture: '这个配置组还没有手势，点右上角「新增手势」开始',
   noMatch: '没有符合条件的手势',
   search: '搜索名称 / 动作',
