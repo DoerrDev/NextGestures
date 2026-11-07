@@ -5,7 +5,7 @@ compile_error!("目前仅支持 Windows，移植时在此处新增 platform 模�
 mod windows;
 
 #[cfg(windows)]
-pub use windows::{clipboard, hook, hotkey, input, shell, window};
+pub use windows::{clipboard, hook, hotkey, input, pip, screen, shell, window};
 
 /// 鼠标状态快照
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

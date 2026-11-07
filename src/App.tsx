@@ -5,6 +5,7 @@ import { check, type Update } from '@tauri-apps/plugin-updater'
 import {
   AppWindow,
   Ban,
+  Camera,
   Copy,
   Globe,
   LayoutGrid,
@@ -39,6 +40,7 @@ import { SettingsDialog } from './components/SettingsDialog'
 import { BlacklistDialog } from './components/BlacklistDialog'
 import { StrokeCanvas } from './components/StrokeCanvas'
 import { UpdateDialog } from './components/UpdateDialog'
+import { ScreenToolsPanel } from './components/ScreenToolsPanel'
 
 const TRIGGER_LABEL: Record<string, string> = {
   Right: '右键',
@@ -57,6 +59,7 @@ export function App() {
   const [editing, setEditing] = useState<{ gesture: Gesture; isNew: boolean } | null>(null)
   const [profileOpen, setProfileOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [screenToolsOpen, setScreenToolsOpen] = useState(false)
   const [blacklistOpen, setBlacklistOpen] = useState(false)
   const [unread, setUnread] = useState(0)
   const [enabled, setEnabled] = useState(true)
@@ -247,6 +250,7 @@ export function App() {
           </button>
         )}
         <div className="topbar-right">
+          <button type="button" className="btn-outline subtle" onClick={() => setScreenToolsOpen(true)}><Camera size={16} />截图工具</button>
           <button
             type="button"
             className={enabled ? 'switch' : 'switch off'}
@@ -724,6 +728,7 @@ export function App() {
           onClose={() => setSettingsOpen(false)}
         />
       )}
+      {screenToolsOpen && <ScreenToolsPanel onClose={() => setScreenToolsOpen(false)} />}
       {blacklistOpen && (
         <BlacklistDialog names={blacklist} onChange={saveBlacklist} onClose={() => setBlacklistOpen(false)} />
       )}

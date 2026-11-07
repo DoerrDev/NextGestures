@@ -7,6 +7,7 @@ mod engine;
 mod feedback;
 mod overlay;
 mod state;
+mod screen_tools;
 
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
@@ -45,7 +46,25 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(state)
+        .manage(screen_tools::ScreenState::default())
+        .register_uri_scheme_protocol("ngimage", |context, request| {
+            let label = request.uri().path().trim_matches('/').trim_end_matches(".png");
+            let data = screen_tools::image(context.app_handle(), label);
+            tauri::http::Response::builder()
+                .status(if data.is_some() { 200 } else { 404 })
+                .header("Content-Type", "image/png")
+                .header("Access-Control-Allow-Origin", "*")
+                .header("Cache-Control", "no-store")
+                .body(data.unwrap_or_default()).unwrap()
+        })
         .invoke_handler(tauri::generate_handler![
+            screen_tools::start_screen_tool,
+            screen_tools::screen_session,
+            screen_tools::screen_output,
+            screen_tools::screen_ocr_languages,
+            screen_tools::screen_copy_text,
+            screen_tools::screen_windows,
+            screen_tools::screen_control,
             commands::get_config,
             commands::config_path,
             commands::save_settings,
@@ -85,6 +104,9 @@ fn main() {
             Ok(())
         })
         .on_window_event(|win, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                screen_tools::closed(win.app_handle(), win.label());
+            }
             // 主窗口关闭只是隐藏，程序常驻托盘
             if let tauri::WindowEvent::CloseRequested { api, .. } = event
                 && win.label() == "main"

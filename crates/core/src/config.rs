@@ -63,6 +63,7 @@ pub enum FireMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
+    ScreenTool { tool: ScreenTool },
     None,
     /// 执行程序 / CMD 命令
     Command {
@@ -80,6 +81,15 @@ pub enum Action {
     /// 用默认浏览器打开链接，`{selection}` 会替换成当前选中的文字
     OpenUrl { url: String },
     Lua { code: String },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenTool {
+    Screenshot,
+    Pin,
+    Pip,
+    Ocr,
 }
 
 impl Default for Action {
@@ -442,6 +452,16 @@ mod tests {
         assert_eq!(back.profiles[0].gestures.len(), 2);
         assert_eq!(back.profiles[0].gestures[0].points.len(), recognizer::NUM_POINTS);
         assert_eq!(back.settings.move_threshold, 20);
+    }
+    #[test]
+    fn screen_tool_actions_roundtrip_without_affecting_existing_config() {
+        for tool in [ScreenTool::Screenshot, ScreenTool::Pin, ScreenTool::Pip, ScreenTool::Ocr] {
+            let mut cfg = Config::default();
+            cfg.profiles[0].gestures[0].action = Action::ScreenTool { tool };
+            let back: Config = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+            assert!(matches!(back.profiles[0].gestures[0].action, Action::ScreenTool { tool: actual } if actual == tool));
+            assert!(matches!(back.profiles[0].gestures[1].action, Action::Hotkey { .. }));
+        }
     }
 
     #[test]

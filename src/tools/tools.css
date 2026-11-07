@@ -1,0 +1,34 @@
+:root { font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; color: #383838; font-size: 14px; }
+* { box-sizing: border-box; }
+html, body, #root { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+button, select, textarea, input { font: inherit; }
+button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 32px; padding: 5px 8px; background: #fff; color: #383838; border: 1px solid #888; border-radius: 3px; cursor: pointer; }
+button:hover, button.active { background: #d7efff; border-color: #3983ae; }
+button:disabled { opacity: .4; cursor: default; }
+button.primary { background: #6fc2ff; border-color: #383838; }
+textarea { resize: vertical; padding: 10px; border: 1px solid #999; border-radius: 3px; }
+.screen-loading, .screen-fatal { background: #f4efea; padding: 24px; }
+.capture-root { width: 100%; height: 100%; position: relative; cursor: crosshair; user-select: none; touch-action: none; }
+.capture-background { width: 100%; height: 100%; position: absolute; inset: 0; pointer-events: none; }
+.capture-shade { position: absolute; inset: 0; background: #0007; pointer-events: none; }
+.capture-instructions { position: absolute; top: 24px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 16px; padding: 12px 16px; background: #f4efea; border: 2px solid #383838; box-shadow: -4px 4px #383838; cursor: default; }
+.capture-selection { position: absolute; outline: 2px solid #6fc2ff; box-shadow: 0 0 0 100000px #0007; }
+.capture-selection canvas { width: 100%; height: 100%; display: block; pointer-events: none; }
+.capture-dimensions { position: absolute; top: 3px; left: 3px; padding: 2px 6px; background: #222b; color: white; font-size: 12px; pointer-events: none; }
+.selection-handle { position: absolute; display: block; width: 9px; height: 9px; background: #fff; border: 1px solid #2373a5; }
+.handle-nw { left: -4px; top: -4px; cursor: nw-resize; }.handle-n { left: 50%; top: -4px; cursor: n-resize; }.handle-ne { right: -4px; top: -4px; cursor: ne-resize; }.handle-e { right: -4px; top: 50%; cursor: e-resize; }.handle-se { right: -4px; bottom: -4px; cursor: se-resize; }.handle-s { left: 50%; bottom: -4px; cursor: s-resize; }.handle-sw { left: -4px; bottom: -4px; cursor: sw-resize; }.handle-w { left: -4px; top: 50%; cursor: w-resize; }
+.capture-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 4px; max-width: calc(100vw - 32px); padding: 8px; position: absolute; left: 50%; top: 16px; transform: translateX(-50%); background: #f4efea; border: 2px solid #383838; box-shadow: -4px 4px #383838; cursor: default; }
+.capture-toolbar input[type=color] { width: 30px; height: 30px; padding: 0; border: 0; }
+.capture-toolbar select { height: 30px; border: 1px solid #888; }
+.toolbar-separator { width: 1px; height: 24px; background: #bbb; margin: 0 3px; }
+.capture-text-entry { position: absolute; top: 80px; left: 50%; transform: translateX(-50%); background: white; padding: 12px; border: 2px solid #383838; display: flex; flex-wrap: wrap; gap: 8px; width: 340px; }
+.capture-text-entry textarea { width: 100%; height: 90px; }
+.capture-notice { position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); max-width: min(700px, 90vw); padding: 12px 18px; background: #ebf9ff; border: 2px solid #383838; box-shadow: -3px 3px #383838; cursor: default; }
+.capture-notice.error { background: #ffe4df; }.capture-notice button { margin-left: 12px; }
+.ocr-panel { position: absolute; right: 16px; top: 80px; bottom: 24px; width: min(420px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 12px; background: #f4efea; border: 2px solid #383838; box-shadow: -4px 4px #383838; padding: 16px; cursor: default; user-select: text; }
+.ocr-panel header, .ocr-panel footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }.ocr-panel textarea { flex: 1; min-height: 100px; resize: none; }.ocr-panel select { padding: 7px; }
+.pin-window { width: 100%; height: 100%; display: flex; flex-direction: column; background: transparent; }
+.pin-toolbar { display: flex; gap: 3px; align-items: center; padding: 4px; height: 44px; flex: none; background: #f4efea; border: 1px solid #383838; }
+.pin-toolbar button { min-height: 28px; padding: 4px; }.pin-toolbar input { width: 56px; }.pin-drag { cursor: grab; flex: 1; font-size: 12px; white-space: nowrap; }
+.pin-image { display: block; flex: 1; min-height: 0; width: 100%; object-fit: contain; cursor: grab; }
+.pin-message { position: absolute; bottom: 8px; left: 8px; right: 8px; background: #f4efea; border: 1px solid #383838; padding: 5px; font-size: 12px; }

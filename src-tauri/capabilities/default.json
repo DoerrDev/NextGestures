@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "NextGestures 主窗口与 overlay 所需的核心权限",
-  "windows": ["main", "overlay"],
+  "windows": ["main", "overlay", "capture-*", "pin-*"],
   "permissions": [
     "core:default",
     "core:window:allow-show",

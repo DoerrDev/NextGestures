@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import type { ScreenTool } from './tools/api'
 
 export type TriggerButton = 'Right' | 'Middle' | 'X1' | 'X2'
 export type Region =
@@ -15,6 +16,7 @@ export type FireMode = 'OnRelease' | 'Immediate'
 export type Point = [number, number]
 
 export type Action =
+  | { kind: 'screen_tool'; tool: ScreenTool }
   | { kind: 'none' }
   | { kind: 'command'; program: string; args: string[]; shell: boolean }
   | { kind: 'hotkey'; keys: string[] }

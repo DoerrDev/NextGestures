@@ -64,6 +64,12 @@ static TRIGGER_MASK: AtomicU8 = AtomicU8::new(0);
 static REGION_MASK: AtomicU8 = AtomicU8::new(0);
 static MOVE_THRESHOLD: AtomicI32 = AtomicI32::new(20);
 static ENABLED: AtomicBool = AtomicBool::new(true);
+static SCREEN_SELECTING: AtomicBool = AtomicBool::new(false);
+
+/// 框选截图时放行原始鼠标输入，不改变用户的手势总开关。
+pub fn set_screen_selecting(on: bool) {
+    SCREEN_SELECTING.store(on, Relaxed);
+}
 static PICKING: AtomicBool = AtomicBool::new(false);
 static WHEEL: AtomicI32 = AtomicI32::new(0);
 static PICK_LAST_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -294,6 +300,16 @@ fn handle_with_blacklist(
     blacklisted: impl FnOnce() -> bool,
 ) -> bool {
     let pt = (ms.pt.x, ms.pt.y);
+
+    if SCREEN_SELECTING.load(Relaxed) {
+        if st.phase != Phase::Idle {
+            reset(st);
+            send(HookEvent::Cancel);
+        }
+        st.bypass_button = None;
+        st.swallowed_left_down = false;
+        return false;
+    }
 
     if msg == WM_LBUTTONUP && st.swallowed_left_down {
         st.swallowed_left_down = false;

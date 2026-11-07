@@ -1406,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "gesture-core"
-version = "0.1.5"
+version = "0.1.6-beta.1"
 dependencies = [
  "anyhow",
  "log",
@@ -1416,13 +1416,14 @@ dependencies = [
 
 [[package]]
 name = "gesture-platform"
-version = "0.1.5"
+version = "0.1.6-beta.1"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
  "gesture-core",
  "log",
  "png 0.18.1",
+ "serde",
  "windows 0.62.2",
 ]
 
@@ -2409,9 +2410,10 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "next-gestures"
-version = "0.1.5"
+version = "0.1.6-beta.1"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "crossbeam-channel",
  "env_logger",
  "gesture-core",

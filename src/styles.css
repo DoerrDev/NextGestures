@@ -452,6 +452,16 @@ textarea {
   font-size: var(--text-caption);
 }
 
+.screen-tool-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.screen-tool-card { display: grid; grid-template-columns: 28px 1fr; align-items: center; gap: 7px 10px; text-align: left; padding: 16px; background: var(--color-frost-white); border: 2px solid var(--color-charcoal-ink); color: inherit; font: inherit; cursor: pointer; }
+.screen-tool-card:hover { background: var(--color-ice-wash); box-shadow: var(--shadow-hard-sm); }
+.screen-tool-card span { grid-column: 1 / -1; font-size: var(--text-caption); color: var(--color-pencil-gray); }
+.screen-window-heading { font-weight: 600; margin: 20px 0 12px; }
+.screen-window-list { padding: 0; list-style: none; max-height: 200px; overflow: auto; }
+.screen-window-list li { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--color-chalk-gray); }
+.screen-window-list span { flex: 1; }
+.screen-tools-help { font-size: var(--text-caption); color: var(--color-pencil-gray); }
+
 .tabs {
   display: flex;
   flex-direction: column;

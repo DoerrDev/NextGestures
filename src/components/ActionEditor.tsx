@@ -2,6 +2,7 @@ import { Play } from 'lucide-react'
 import { api, type Action } from '../api'
 import { t } from '../i18n'
 import { HotkeyRecorder } from './HotkeyRecorder'
+import { TOOL_NAMES, type ScreenTool } from '../tools/api'
 
 interface Props {
   action: Action
@@ -9,9 +10,10 @@ interface Props {
   onError: (msg: string) => void
 }
 
-const KINDS: Action['kind'][] = ['none', 'command', 'hotkey', 'key_sequence', 'open_url', 'lua']
+const KINDS: Action['kind'][] = ['none', 'screen_tool', 'command', 'hotkey', 'key_sequence', 'open_url', 'lua']
 
 const KIND_LABEL: Record<Action['kind'], () => string> = {
+  screen_tool: () => '截图工具',
   none: () => t('actionNone'),
   command: () => t('actionCommand'),
   hotkey: () => t('actionHotkey'),
@@ -37,6 +39,8 @@ ng.send_keys("alt+tab")
 
 function blank(kind: Action['kind']): Action {
   switch (kind) {
+    case 'screen_tool':
+      return { kind, tool: 'screenshot' }
     case 'command':
       return { kind, program: '', args: [], shell: false }
     case 'hotkey':
@@ -84,6 +88,15 @@ export function ActionEditor({ action, onChange, onError }: Props) {
         </select>
       </div>
 
+      {action.kind === 'screen_tool' && (
+        <div className="field">
+          <label htmlFor="action-screen-tool">功能</label>
+          <select id="action-screen-tool" value={action.tool} onChange={e => onChange({ kind: 'screen_tool', tool: e.target.value as ScreenTool })}>
+            {Object.entries(TOOL_NAMES).map(([key, name]) => <option key={key} value={key}>{name}</option>)}
+          </select>
+          <p className="field-note" style={{ marginTop: 8 }}>松开触发键后框选区域；截图支持标注，OCR 在本机离线识别。</p>
+        </div>
+      )}
       {action.kind === 'command' && (
         <>
           <div className="field">
@@ -188,6 +201,8 @@ export function ActionEditor({ action, onChange, onError }: Props) {
 
 export function describeAction(action: Action): string {
   switch (action.kind) {
+    case 'screen_tool':
+      return TOOL_NAMES[action.tool]
     case 'command':
       return `${action.program} ${action.args.join(' ')}`.trim()
     case 'hotkey':

@@ -360,7 +360,7 @@ fn lookup(
         name: m.gesture.name.clone(),
         score: m.score,
         // 右键组合存在时保留追加左键的机会，统一在右键松开时执行。
-        fire_mode: if left_click || matcher::requires_release(&cfg, exe, button) {
+        fire_mode: if matches!(m.gesture.action, Action::ScreenTool { .. }) || left_click || matcher::requires_release(&cfg, exe, button) {
             FireMode::OnRelease
         } else {
             m.gesture.fire_mode
@@ -418,7 +418,7 @@ fn fire(app: &AppHandle, exe: &str, hit: Hit, show_hint: bool) {
             exe: exe.to_string(),
         },
     );
-    crate::action::spawn(hit.action);
+    crate::action::spawn(app, hit.action);
 }
 
 /// 在桌面 overlay 上弹一条短提示，样式沿用手势提示的字体/颜色/偏移
