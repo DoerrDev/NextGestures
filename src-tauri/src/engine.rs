@@ -186,7 +186,7 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
                         let show_hint = s.as_ref().is_none_or(|s| {
                             s.shown_name.as_deref() != Some(hit.name.as_str())
                         });
-                        fire(&app, &exe, hit, show_hint)
+                        fire(&app, &exe, hit, show_hint, &points)
                     }
                     None => log::debug!(
                         "手势结束未命中 {button:?} {region:?} {wheel:?} 采样 {} 点 @ {} 最接近: {}",
@@ -305,7 +305,7 @@ fn on_partial(app: &AppHandle, s: &mut Session) {
     {
         s.fired = true;
         let exe = s.exe.clone();
-        fire(app, &exe, hit, false);
+        fire(app, &exe, hit, false, &s.raw);
     }
 }
 
@@ -320,7 +320,7 @@ fn on_wheel_partial(app: &AppHandle, s: &mut Session) {
     s.fired = true;
     s.shown_name = Some(hit.name.clone());
     let exe = s.exe.clone();
-    fire(app, &exe, hit, true);
+    fire(app, &exe, hit, true, &s.raw);
 }
 
 fn to_input<'a>(
@@ -360,7 +360,7 @@ fn lookup(
         name: m.gesture.name.clone(),
         score: m.score,
         // 右键组合存在时保留追加左键的机会，统一在右键松开时执行。
-        fire_mode: if matches!(m.gesture.action, Action::ScreenTool { .. }) || left_click || matcher::requires_release(&cfg, exe, button) {
+        fire_mode: if matches!(m.gesture.action, Action::PinScreenshot) || left_click || matcher::requires_release(&cfg, exe, button) {
             FireMode::OnRelease
         } else {
             m.gesture.fire_mode
@@ -390,7 +390,7 @@ fn nearest(
     }
 }
 
-fn fire(app: &AppHandle, exe: &str, hit: Hit, show_hint: bool) {
+fn fire(app: &AppHandle, exe: &str, hit: Hit, show_hint: bool, raw: &[(i32, i32)]) {
     log::info!("命中手势 {} (score {:.3}) @ {}", hit.name, hit.score, exe);
     if show_hint {
         let state = app.state::<AppState>();
@@ -418,7 +418,14 @@ fn fire(app: &AppHandle, exe: &str, hit: Hit, show_hint: bool) {
             exe: exe.to_string(),
         },
     );
-    crate::action::spawn(app, hit.action);
+    if matches!(hit.action, Action::PinScreenshot) {
+        match gesture_platform::pin::Bounds::from_points(raw) {
+            Ok(bounds) => crate::pin::spawn(app.clone(), bounds),
+            Err(e) => toast(app, &e.to_string()),
+        }
+    } else {
+        crate::action::spawn(hit.action);
+    }
 }
 
 /// 在桌面 overlay 上弹一条短提示，样式沿用手势提示的字体/颜色/偏移

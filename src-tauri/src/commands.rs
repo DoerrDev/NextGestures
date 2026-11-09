@@ -176,10 +176,7 @@ pub fn virtual_screen_size(app: AppHandle) -> VirtualScreenSize {
 }
 
 #[tauri::command]
-pub async fn test_action(app: AppHandle, action: Action) -> R<()> {
-    if let Action::ScreenTool { tool } = action {
-        return crate::screen_tools::start_screen_tool(app, tool).await.map(|_| ());
-    }
+pub fn test_action(action: Action) -> R<()> {
     crate::action::run(&action).map_err(|e| format!("{e:#}"))
 }
 

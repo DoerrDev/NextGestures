@@ -12,6 +12,7 @@ import {
 } from 'lucide-react'
 import {
   api,
+  isBuiltinGesture,
   REGIONS,
   TRIGGERS,
   type FireMode,
@@ -124,6 +125,27 @@ export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelet
     if (draft.region && draft.points.length > 0) return setError(t('regionWheelOnly'))
     onSave({ ...draft, name: draft.name.trim() })
   }
+
+  if (isBuiltinGesture(initial)) return (
+    <aside className="pane">
+      <div className="pane-head">
+        <h2>{initial.name}<span className="tag blue builtin-tag">内置</span></h2>
+        <button type="button" className="btn-icon" onClick={onClose} title={t('cancel')}><X size={16} /></button>
+      </div>
+      <div className="pane-body">
+        <StrokeCanvas className="frame" points={initial.points} trigger={initial.trigger} color="#6fc2ff" />
+        <p>按住鼠标右键，沿下 → 右 → 上 → 左圈住内容，松开即生成置顶贴图。</p>
+        <p className="field-note" style={{ marginTop: 12 }}>内置手势仅支持开启或关闭。</p>
+        <details className="field-note" style={{ marginTop: 12 }}><summary>贴图操作</summary>拖动移动，滚轮调透明度，双击折叠或恢复，右键关闭。</details>
+      </div>
+      <div className="pane-foot">
+        <button type="button" className="btn-ghost" onClick={() => onToggle(initial)}>
+          {initial.enabled ? <PowerOff size={14} /> : <Power size={14} />}
+          {initial.enabled ? t('disable') : t('enable')}
+        </button>
+      </div>
+    </aside>
+  )
 
   return (
     <aside className="pane">

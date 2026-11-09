@@ -1,5 +1,4 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { ScreenTool } from './tools/api'
 
 export type TriggerButton = 'Right' | 'Middle' | 'X1' | 'X2'
 export type Region =
@@ -16,8 +15,8 @@ export type FireMode = 'OnRelease' | 'Immediate'
 export type Point = [number, number]
 
 export type Action =
-  | { kind: 'screen_tool'; tool: ScreenTool }
   | { kind: 'none' }
+  | { kind: 'pin_screenshot' }
   | { kind: 'command'; program: string; args: string[]; shell: boolean }
   | { kind: 'hotkey'; keys: string[] }
   | { kind: 'key_sequence'; steps: string[][] }
@@ -39,6 +38,8 @@ export interface Gesture {
   times: number[]
   action: Action
 }
+
+export const isBuiltinGesture = (gesture: Gesture) => gesture.id === 'builtin-pin-screenshot'
 
 export interface Profile {
   id: string

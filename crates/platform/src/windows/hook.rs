@@ -64,12 +64,6 @@ static TRIGGER_MASK: AtomicU8 = AtomicU8::new(0);
 static REGION_MASK: AtomicU8 = AtomicU8::new(0);
 static MOVE_THRESHOLD: AtomicI32 = AtomicI32::new(20);
 static ENABLED: AtomicBool = AtomicBool::new(true);
-static SCREEN_SELECTING: AtomicBool = AtomicBool::new(false);
-
-/// 框选截图时放行原始鼠标输入，不改变用户的手势总开关。
-pub fn set_screen_selecting(on: bool) {
-    SCREEN_SELECTING.store(on, Relaxed);
-}
 static PICKING: AtomicBool = AtomicBool::new(false);
 static WHEEL: AtomicI32 = AtomicI32::new(0);
 static PICK_LAST_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -282,6 +276,11 @@ fn on_idle(st: &mut HookState) {
 fn handle(st: &mut HookState, msg: u32, ms: &MSLLHOOKSTRUCT) -> bool {
     let pt = (ms.pt.x, ms.pt.y);
     handle_with_blacklist(st, msg, ms, || {
+        // 贴图上的按键、滚轮交给原生窗口，右键关闭不会被全局手势吞掉。
+        let native_input = msg == WM_MOUSEWHEEL || button_of(msg, ms).is_some_and(|(_, down)| down);
+        if native_input && super::pin::is_at(pt) {
+            return true;
+        }
         // 普通滚动、未启用的触发键和总开关关闭时不需要查询目标窗口。
         ENABLED.load(Relaxed)
             && super::blacklist::active()
@@ -300,16 +299,6 @@ fn handle_with_blacklist(
     blacklisted: impl FnOnce() -> bool,
 ) -> bool {
     let pt = (ms.pt.x, ms.pt.y);
-
-    if SCREEN_SELECTING.load(Relaxed) {
-        if st.phase != Phase::Idle {
-            reset(st);
-            send(HookEvent::Cancel);
-        }
-        st.bypass_button = None;
-        st.swallowed_left_down = false;
-        return false;
-    }
 
     if msg == WM_LBUTTONUP && st.swallowed_left_down {
         st.swallowed_left_down = false;
@@ -506,6 +495,39 @@ mod tests {
             pt: POINT { x, y: 0 }, time: x as u32,
             ..Default::default()
         })
+    }
+
+    #[test]
+    #[ignore = "opens a real desktop pin window; run alone"]
+    fn desktop_pin_right_button_bypasses_gesture_hook() {
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, HTCAPTION, IsWindowVisible, SendMessageW, WM_NCRBUTTONUP};
+        let worker = std::thread::spawn(|| super::super::pin::open(super::super::pin::Bounds {
+            x: 100, y: 100, width: 240, height: 160,
+        }));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let hwnd = loop {
+            if let Ok(hwnd) = unsafe { FindWindowW(w!("NextGesturesQuickPin"), None) } {
+                if unsafe { IsWindowVisible(hwnd) }.as_bool() { break hwnd; }
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(25));
+        };
+        let previous = TRIGGER_MASK.swap(TriggerButton::Right.bit(), Relaxed);
+        let mut st = state(TriggerButton::Right);
+        reset(&mut st);
+        let ms = MSLLHOOKSTRUCT { pt: POINT { x: 150, y: 150 }, ..Default::default() };
+        let down = handle(&mut st, WM_RBUTTONDOWN, &ms);
+        let bypass = st.bypass_button;
+        let up = handle(&mut st, WM_RBUTTONUP, &ms);
+        TRIGGER_MASK.store(previous, Relaxed);
+        unsafe { SendMessageW(hwnd, WM_NCRBUTTONUP, Some(WPARAM(HTCAPTION as usize)), None); }
+        worker.join().unwrap().unwrap();
+        assert!(!down && !up);
+        assert_eq!(bypass, Some(TriggerButton::Right));
+        assert_eq!(st.phase, Phase::Idle);
+        assert!(st.bypass_button.is_none());
+        println!("Pin right down/up passed the gesture hook with Right trigger enabled");
     }
 
     #[test]

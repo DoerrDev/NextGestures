@@ -9,16 +9,8 @@ use gesture_platform::{clipboard, input, shell, window};
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// 动作可能阻塞（起进程 / 跑 lua），单独开线程执行
-pub fn spawn(app: &tauri::AppHandle, action: Action) {
-    let app = app.clone();
+pub fn spawn(action: Action) {
     std::thread::spawn(move || {
-        if let Action::ScreenTool { tool } = action {
-            if let Err(e) = crate::screen_tools::start(&app, tool) {
-                log::error!("启动截图工具失败: {e:#}");
-                crate::engine::toast(&app, &format!("截图工具：{e}"));
-            }
-            return;
-        }
         if let Err(e) = run(&action) {
             log::error!("执行动作失败: {e:#}");
         }
@@ -27,8 +19,8 @@ pub fn spawn(app: &tauri::AppHandle, action: Action) {
 
 pub fn run(action: &Action) -> Result<()> {
     match action {
-        Action::ScreenTool { .. } => anyhow::bail!("请从手势或主界面启动截图工具"),
         Action::None => Ok(()),
+        Action::PinScreenshot => anyhow::bail!("请通过手势圈出需要置顶的区域"),
         Action::Command { program, args, shell } => run_command(program, args, *shell),
         Action::Hotkey { keys } => input::send_hotkey(keys),
         Action::KeySequence { steps } => {

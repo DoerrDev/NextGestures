@@ -2,7 +2,6 @@ import { Play } from 'lucide-react'
 import { api, type Action } from '../api'
 import { t } from '../i18n'
 import { HotkeyRecorder } from './HotkeyRecorder'
-import { TOOL_NAMES, type ScreenTool } from '../tools/api'
 
 interface Props {
   action: Action
@@ -10,10 +9,10 @@ interface Props {
   onError: (msg: string) => void
 }
 
-const KINDS: Action['kind'][] = ['none', 'screen_tool', 'command', 'hotkey', 'key_sequence', 'open_url', 'lua']
+const KINDS: Action['kind'][] = ['none', 'pin_screenshot', 'command', 'hotkey', 'key_sequence', 'open_url', 'lua']
 
 const KIND_LABEL: Record<Action['kind'], () => string> = {
-  screen_tool: () => '截图工具',
+  pin_screenshot: () => '快速截图并置顶',
   none: () => t('actionNone'),
   command: () => t('actionCommand'),
   hotkey: () => t('actionHotkey'),
@@ -39,8 +38,8 @@ ng.send_keys("alt+tab")
 
 function blank(kind: Action['kind']): Action {
   switch (kind) {
-    case 'screen_tool':
-      return { kind, tool: 'screenshot' }
+    case 'pin_screenshot':
+      return { kind }
     case 'command':
       return { kind, program: '', args: [], shell: false }
     case 'hotkey':
@@ -88,15 +87,11 @@ export function ActionEditor({ action, onChange, onError }: Props) {
         </select>
       </div>
 
-      {action.kind === 'screen_tool' && (
-        <div className="field">
-          <label htmlFor="action-screen-tool">功能</label>
-          <select id="action-screen-tool" value={action.tool} onChange={e => onChange({ kind: 'screen_tool', tool: e.target.value as ScreenTool })}>
-            {Object.entries(TOOL_NAMES).map(([key, name]) => <option key={key} value={key}>{name}</option>)}
-          </select>
-          <p className="field-note" style={{ marginTop: 8 }}>松开触发键后框选区域；截图支持标注，OCR 在本机离线识别。</p>
-        </div>
-      )}
+      {action.kind === 'pin_screenshot' && <>
+        <p className="field-note">录制下 → 右 → 上 → 左的方框手势。圈住内容，松开即生成置顶贴图。</p>
+        <details className="field-note"><summary>贴图操作</summary>拖动图片移动，滚轮调透明度，双击折叠或恢复，右键或 Esc 关闭。</details>
+      </>}
+
       {action.kind === 'command' && (
         <>
           <div className="field">
@@ -189,7 +184,7 @@ export function ActionEditor({ action, onChange, onError }: Props) {
         </div>
       )}
 
-      {action.kind !== 'none' && (
+      {action.kind !== 'none' && action.kind !== 'pin_screenshot' && (
         <button type="button" className="btn-outline subtle" onClick={test}>
           <Play size={16} strokeWidth={2} />
           {t('test')}
@@ -201,8 +196,8 @@ export function ActionEditor({ action, onChange, onError }: Props) {
 
 export function describeAction(action: Action): string {
   switch (action.kind) {
-    case 'screen_tool':
-      return TOOL_NAMES[action.tool]
+    case 'pin_screenshot':
+      return '快速截图并置顶'
     case 'command':
       return `${action.program} ${action.args.join(' ')}`.trim()
     case 'hotkey':
