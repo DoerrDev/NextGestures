@@ -5,6 +5,7 @@ import arrowUpRight from '../assets/icons/arrow-up-right.svg?raw'
 import arrowDownLeft from '../assets/icons/arrow-down-left.svg?raw'
 import arrowDownRight from '../assets/icons/arrow-down-right.svg?raw'
 import gestureMouse from '../assets/icons/gesture-mouse.svg?raw'
+import { isPageActive, onPageActiveChange } from '../pageActive'
 
 /** 取出 lucide svg 里的所有 path（24x24 视口） */
 function paths(svg: string): Path2D[] {
@@ -51,6 +52,12 @@ const CLICK_RELEASE_MS = 180
 const STROKE_MIN_MS = 1200
 const STROKE_MAX_MS = 4000
 const MARK = '#5a5a5a'
+/**
+ * 循环回放的帧间隔，缩略图 30fps 足够流畅。
+ * 按全局时间对齐到同一网格：同一帧里所有缩略图一起更新，页面每秒只合成 ~30 次；
+ * 若各自从挂载时刻起算，相位错开后几乎每个 vsync 都有某个缩略图在变，限帧就白做了
+ */
+const PLAYBACK_FRAME_MS = 1000 / 30
 
 /** 回放轨迹，并通过鼠标 SVG 展示按键、滚轮方向和终点点击。 */
 export function StrokeCanvas({
@@ -296,13 +303,58 @@ export function StrokeCanvas({
     let raf = 0
     const start = performance.now()
     const cycle = total + HOLD_MS
-    const tick = (now: number) => {
-      const elapsed = now - start
-      draw(live ? elapsed : elapsed % cycle)
-      if (!live || elapsed < total) raf = requestAnimationFrame(tick)
+    if (live) {
+      const tick = (now: number) => {
+        const elapsed = now - start
+        draw(elapsed)
+        if (elapsed < total) raf = requestAnimationFrame(tick)
+      }
+      raf = requestAnimationFrame(tick)
+      return () => cancelAnimationFrame(raf)
     }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
+
+    // 循环回放：列表里可能同时有几十个缩略图，只在可见（窗口在前台且滚动到视口内）时播放，
+    // 并限到 ~30fps；暂停时停在完整轨迹上，避免关到托盘后 GPU 进程空转。
+    let inView = false
+    let lastSlot = -1
+    let holdDrawn = false
+    const tick = (now: number) => {
+      raf = requestAnimationFrame(tick)
+      const slot = Math.floor(now / PLAYBACK_FRAME_MS)
+      if (slot === lastSlot) return
+      const t = (now - start) % cycle
+      // 回放结束后的停留段画面与 t 无关（所有动画都在 releaseAt = total 前结束），画一次即可
+      if (t >= total) {
+        if (holdDrawn) return
+        holdDrawn = true
+      } else {
+        holdDrawn = false
+      }
+      lastSlot = slot
+      draw(t)
+    }
+    const update = () => {
+      const run = inView && isPageActive()
+      if (run && !raf) {
+        raf = requestAnimationFrame(tick)
+      } else if (!run && raf) {
+        cancelAnimationFrame(raf)
+        raf = 0
+        draw(Infinity)
+      }
+    }
+    draw(Infinity)
+    const io = new IntersectionObserver((entries) => {
+      inView = entries.some((e) => e.isIntersecting)
+      update()
+    })
+    io.observe(canvas)
+    const off = onPageActiveChange(update)
+    return () => {
+      io.disconnect()
+      off()
+      cancelAnimationFrame(raf)
+    }
   }, [points, times, region, wheel, trigger, leftClick, live, color, width, glowColor, glowBlur])
 
   return <canvas ref={ref} className={className} />

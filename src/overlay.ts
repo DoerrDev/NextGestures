@@ -50,6 +50,12 @@ let labelOffset: [number, number] = [0, 0]
 /** 每帧整条重画：用经过中点的二次贝塞尔平滑，避免逐段叠加带来的锯齿 */
 const points: [number, number][] = []
 let raf = 0
+/**
+ * 画布上是否有内容。实测只擦包围盒反而更费 GPU：整张 clearRect 能让 Chromium 直接丢弃旧帧，
+ * 局部擦除则要保留并拷贝上一帧，所以仍整张清，只是空画布时跳过
+ */
+let dirty = false
+let appliedFilter = ''
 
 label.addEventListener('animationend', (e) => {
   if (e.animationName !== 'hint-drop-in' || !labelMode) return
@@ -57,14 +63,25 @@ label.addEventListener('animationend', (e) => {
   label.classList.add('static')
 })
 
+/** 赋值 canvas.width 即使数值不变也会重新分配整张全屏位图并重置上下文，只在尺寸真的变化时做 */
 function resize() {
   const dpr = window.devicePixelRatio || 1
-  canvas.width = Math.round(window.innerWidth * dpr)
-  canvas.height = Math.round(window.innerHeight * dpr)
+  const w = Math.round(window.innerWidth * dpr)
+  const h = Math.round(window.innerHeight * dpr)
+  if (canvas.width === w && canvas.height === h) return
+  canvas.width = w
+  canvas.height = h
+  dirty = false
+}
+
+function clearDirty() {
+  if (!dirty) return
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+  dirty = false
 }
 
 function clearTrail() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height)
+  clearDirty()
   matched = false
   points.length = 0
   cancelAnimationFrame(raf)
@@ -87,14 +104,19 @@ function applyStyle() {
   ctx.lineJoin = 'round'
   ctx.strokeStyle = matched ? style.color : style.missColor
   ctx.lineWidth = style.width * dpr
-  canvas.style.filter =
+  // 每帧重设同样的 filter 也会触发样式重算
+  const filter =
     matched && style.glowBlur > 0
       ? `drop-shadow(0 0 ${style.glowBlur}px ${style.glowColor})`
       : 'none'
+  if (filter !== appliedFilter) {
+    canvas.style.filter = filter
+    appliedFilter = filter
+  }
 }
 
 function repaint() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height)
+  clearDirty()
   if (!style.showTrail) return
   applyStyle()
   if (points.length < 2) return
@@ -108,6 +130,7 @@ function repaint() {
   const [ex, ey] = points[points.length - 1]
   ctx.lineTo(ex, ey)
   ctx.stroke()
+  dirty = true
 }
 
 resize()
@@ -146,9 +169,11 @@ void listen<TrailBegin>('trail:begin', (e) => {
   applyStyle()
 })
 
-void listen<[number, number]>('trail:point', (e) => {
-  const p = toLocal(e.payload)
-  points.push(p)
+/** 后端按 ~4ms 批量推送（见 engine::TRAIL_FLUSH），关闭轨迹显示时不会推送 */
+void listen<[number, number][]>('trail:points', (e) => {
+  // 不显示轨迹时什么都不用画，也就不必每帧去碰全屏画布
+  if (!style.showTrail) return
+  for (const p of e.payload) points.push(toLocal(p))
   schedule()
 })
 

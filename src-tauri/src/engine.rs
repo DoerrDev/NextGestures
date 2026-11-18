@@ -1,6 +1,7 @@
 use std::sync::atomic::Ordering::Relaxed;
+use std::time::{Duration, Instant};
 
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, RecvTimeoutError};
 use gesture_core::{Action, FireMode, Point, Region, TriggerButton, WheelDir, matcher, recognizer};
 use gesture_platform::hook::{self, HookEvent};
 use gesture_platform::{input, window};
@@ -96,6 +97,43 @@ struct Session {
     raw: Vec<(i32, i32)>,
     fired: bool,
     shown_name: Option<String>,
+    /// 关闭轨迹显示时不往 overlay 推点
+    show_trail: bool,
+}
+
+/// 两次向 overlay 推送轨迹点的最小间隔。
+/// 鼠标回报率可达 1000Hz，每个点单独 emit 就是一次 WebView2 ExecuteScript；
+/// overlay 每帧才重画一次，按 ~250Hz 批量推送观感不变
+const TRAIL_FLUSH: Duration = Duration::from_millis(4);
+
+/// 待推送给 overlay 的轨迹点。距上次推送已超过 TRAIL_FLUSH 时立即发出（低速移动零额外延迟），
+/// 否则攒着等到点或下一个事件到来再一起发
+struct TrailBuf {
+    pts: Vec<[i32; 2]>,
+    last: Instant,
+}
+
+impl TrailBuf {
+    fn push(&mut self, app: &AppHandle, p: (i32, i32)) {
+        self.pts.push([p.0, p.1]);
+        if self.last.elapsed() >= TRAIL_FLUSH {
+            self.flush(app);
+        }
+    }
+
+    fn flush(&mut self, app: &AppHandle) {
+        if self.pts.is_empty() {
+            return;
+        }
+        let _ = app.emit_to(overlay::LABEL, "trail:points", &self.pts);
+        self.pts.clear();
+        self.last = Instant::now();
+    }
+
+    /// 有积压时，最迟何时必须发出
+    fn deadline(&self) -> Option<Instant> {
+        (!self.pts.is_empty()).then(|| self.last + TRAIL_FLUSH)
+    }
 }
 
 pub fn spawn(app: AppHandle, rx: Receiver<HookEvent>) {
@@ -107,7 +145,26 @@ pub fn spawn(app: AppHandle, rx: Receiver<HookEvent>) {
 
 fn run(app: AppHandle, rx: Receiver<HookEvent>) {
     let mut session: Option<Session> = None;
-    while let Ok(ev) = rx.recv() {
+    let mut trail = TrailBuf { pts: Vec::new(), last: Instant::now() };
+    loop {
+        let ev = match trail.deadline() {
+            Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
+                Ok(ev) => ev,
+                Err(RecvTimeoutError::Timeout) => {
+                    trail.flush(&app);
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            },
+            None => match rx.recv() {
+                Ok(ev) => ev,
+                Err(_) => break,
+            },
+        };
+        // 其它事件（命中提示、结束等）必须排在已画出的点之后到达 overlay
+        if !matches!(ev, HookEvent::Move { .. }) {
+            trail.flush(&app);
+        }
         match ev {
             HookEvent::PassThroughClick { button } => input::click(button),
             HookEvent::Picked(info) => {
@@ -128,8 +185,9 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
                     raw: vec![point],
                     fired: false,
                     shown_name: None,
+                    show_trail: true,
                 });
-                begin_trail(&app);
+                session.as_mut().unwrap().show_trail = begin_trail(&app);
                 emit_live(&app, session.as_ref().unwrap());
             }
             HookEvent::Wheel { dir, region } => {
@@ -142,6 +200,7 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
                     raw: vec![],
                     fired: false,
                     shown_name: None,
+                    show_trail: show_trail_enabled(&app),
                 });
                 s.wheel.push(dir);
                 emit_live(&app, s);
@@ -152,9 +211,12 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
             HookEvent::Move { point } => {
                 let Some(s) = session.as_mut() else { continue };
                 s.raw.push(point);
-                let _ = app.emit_to(overlay::LABEL, "trail:point", [point.0, point.1]);
+                if s.show_trail {
+                    trail.push(&app, point);
+                }
                 if recording(&app) {
-                    let _ = app.emit("gesture:live-point", [point.0, point.1]);
+                    // 只有设置窗口的录制面板关心，不必广播给 overlay
+                    let _ = app.emit_to("main", "gesture:live-point", [point.0, point.1]);
                 } else if !s.fired && s.raw.len() >= 6 && s.raw.len() % 3 == 0 {
                     on_partial(&app, s);
                 }
@@ -163,7 +225,10 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
                 let Some(s) = session.as_mut() else { continue };
                 s.left_click = true;
                 s.raw.push(point);
-                let _ = app.emit_to(overlay::LABEL, "trail:point", [point.0, point.1]);
+                if s.show_trail {
+                    trail.push(&app, point);
+                    trail.flush(&app);
+                }
                 emit_live(&app, s);
                 if !recording(&app) && !s.fired {
                     on_partial(&app, s);
@@ -208,7 +273,8 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
     }
 }
 
-fn begin_trail(app: &AppHandle) {
+/// 返回本次手势是否显示轨迹
+fn begin_trail(app: &AppHandle) -> bool {
     let state = app.state::<AppState>();
     let mut style = {
         let cfg = state.config.read().unwrap();
@@ -229,7 +295,13 @@ fn begin_trail(app: &AppHandle) {
     let _ = overlay::ensure(app);
     let o = overlay::origin(app);
     style.origin = [o.0, o.1];
+    let show_trail = style.show_trail;
     let _ = app.emit_to(overlay::LABEL, "trail:begin", style);
+    show_trail
+}
+
+fn show_trail_enabled(app: &AppHandle) -> bool {
+    app.state::<AppState>().config.read().unwrap().settings.show_trail
 }
 
 fn emit_live(app: &AppHandle, s: &Session) {

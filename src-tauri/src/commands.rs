@@ -197,6 +197,7 @@ pub fn hide_settings(app: AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.hide();
     }
+    crate::notify_main_visibility(&app, false);
 }
 
 #[tauri::command]

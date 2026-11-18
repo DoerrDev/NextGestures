@@ -92,6 +92,14 @@ fn main() {
             {
                 api.prevent_close();
                 let _ = win.hide();
+                notify_main_visibility(win.app_handle(), false);
+            }
+            // 最小化同样不会让 WebView2 停掉 requestAnimationFrame
+            if let tauri::WindowEvent::Resized(_) = event
+                && win.label() == "main"
+            {
+                let shown = win.is_visible().unwrap_or(true) && !win.is_minimized().unwrap_or(false);
+                notify_main_visibility(win.app_handle(), shown);
             }
         })
         .run(tauri::generate_context!())
@@ -115,6 +123,13 @@ fn show_settings(app: &AppHandle) {
         let _ = w.unminimize();
         let _ = w.set_focus();
     }
+    notify_main_visibility(app, true);
+}
+
+/// 隐藏到托盘时 WebView2 不会把页面标成 hidden，前端动画会继续空转吃 GPU，
+/// 这里显式告诉前端主窗口是否在屏幕上
+pub fn notify_main_visibility(app: &AppHandle, visible: bool) {
+    let _ = app.emit_to("main", "main:visibility", visible);
 }
 
 fn build_tray(app: &mut App) -> tauri::Result<()> {
