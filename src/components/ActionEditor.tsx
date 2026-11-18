@@ -89,7 +89,7 @@ export function ActionEditor({ action, onChange, onError }: Props) {
 
       {action.kind === 'pin_screenshot' && <>
         <p className="field-note">录制下 → 右 → 上 → 左的方框手势。圈住内容，松开即生成置顶贴图。</p>
-        <details className="field-note"><summary>贴图操作</summary>拖动图片移动，滚轮调透明度，双击折叠或恢复，右键或 Esc 关闭。</details>
+        <details className="field-note"><summary>贴图操作</summary>鼠标移到贴图上，可用底部工具栏复制原图、保存 PNG、调透明度或关闭。拖动移动，双击折叠或恢复，右键或 Esc 关闭。</details>
       </>}
 
       {action.kind === 'command' && (

@@ -136,7 +136,7 @@ export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelet
         <StrokeCanvas className="frame" points={initial.points} trigger={initial.trigger} color="#6fc2ff" />
         <p>按住鼠标右键，沿下 → 右 → 上 → 左圈住内容，松开即生成置顶贴图。</p>
         <p className="field-note" style={{ marginTop: 12 }}>内置手势仅支持开启或关闭。</p>
-        <details className="field-note" style={{ marginTop: 12 }}><summary>贴图操作</summary>拖动移动，滚轮调透明度，双击折叠或恢复，右键关闭。</details>
+        <details className="field-note" style={{ marginTop: 12 }}><summary>贴图操作</summary>鼠标移到贴图上，使用底部工具栏复制原图、保存 PNG、调透明度或关闭。拖动移动，双击折叠或恢复，右键关闭。</details>
       </div>
       <div className="pane-foot">
         <button type="button" className="btn-ghost" onClick={() => onToggle(initial)}>

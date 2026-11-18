@@ -8,12 +8,24 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetThreadDpiAwarenessContext,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetCapture, GetKeyState, ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE,
+    VK_MENU, VK_RETURN,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::w;
 
-const SHADOW: i32 = 20;
+use super::pin_draw::{self as draw, Canvas, Ink, P, Shape, Tool};
+use super::pin_text;
+use super::pin_toolbar as bar;
+
+#[path = "pin_ink.rs"]
+mod ink;
+use ink::with_picture;
+
+pub(super) const SHADOW: i32 = 20;
 const FOLD_SIZE: i32 = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,8 +66,8 @@ impl Bounds {
 }
 
 /// top-down BGRA DIB；仅阴影使用半透明像素，符合预乘 alpha 格式。
-struct Surface {
-    dc: HDC,
+pub(super) struct Surface {
+    pub(super) dc: HDC,
     bitmap: HBITMAP,
     previous: HGDIOBJ,
     pixels: *mut u8,
@@ -63,7 +75,7 @@ struct Surface {
     height: i32,
 }
 impl Surface {
-    fn new(width: i32, height: i32) -> Result<Self> {
+    pub(super) fn new(width: i32, height: i32) -> Result<Self> {
         unsafe {
             let dc = CreateCompatibleDC(None);
             ensure!(!dc.is_invalid(), "创建图片缓冲区失败");
@@ -101,7 +113,7 @@ impl Surface {
             Ok(surface)
         }
     }
-    fn bytes_mut(&mut self) -> &mut [u8] {
+    pub(super) fn bytes_mut(&mut self) -> &mut [u8] {
         unsafe {
             std::slice::from_raw_parts_mut(
                 self.pixels,
@@ -136,12 +148,33 @@ struct Picture {
     surface: Surface,
     alpha: u8,
     wheel_remainder: i32,
+    exporting: bool,
+    /// 被点击选中（贴图或其工具栏/文字框处于前台）。
+    selected: bool,
+    ink: ink::Annotate,
 }
+
 impl Picture {
+    fn png(&self) -> Result<Vec<u8>> {
+        let mut rgba = self.pixels.clone();
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, self.width as u32, self.height as u32);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_compression(png::Compression::Fast);
+            encoder.write_header()?.write_image_data(&rgba)?;
+        }
+        Ok(bytes)
+    }
     fn compose(&self, view: View) -> Result<Surface> {
         let mut surface = Surface::new(view.width + SHADOW * 2, view.height + SHADOW * 2)?;
         let stride = surface.width as usize * 4;
         let bytes = surface.bytes_mut();
+        let glow = if self.selected { GLOW_SELECTED } else { GLOW_IDLE };
         // 内容直接逐行复制；透明度改变时复用已合成的 DIB，不再截图或重算阴影。
         for y in 0..view.height + SHADOW * 2 {
             for x in 0..view.width + SHADOW * 2 {
@@ -151,7 +184,7 @@ impl Picture {
                     continue;
                 }
                 let i = y as usize * stride + x as usize * 4;
-                bytes[i..i + 4].copy_from_slice(&edge_pixel(x, y, view.width, view.height));
+                bytes[i..i + 4].copy_from_slice(&edge_pixel(x, y, view.width, view.height, glow));
             }
         }
         for y in 0..view.height {
@@ -172,15 +205,21 @@ fn shadow_alpha(x: i32, y: i32, width: i32, height: i32) -> u8 {
     (95.0 * (-distance * distance / 85.0).exp() * (1.0 - distance / 20.0).max(0.0)).round() as u8
 }
 
+/// 选中时辉光更亮，未选中（失活）时更淡。
+const GLOW_SELECTED: f32 = 1.8;
+const GLOW_IDLE: f32 = 0.5;
+
 /// 淡蓝细边与外扩辉光叠在黑色阴影上，输出预乘 BGRA；不覆盖截图内容。
-fn edge_pixel(x: i32, y: i32, width: i32, height: i32) -> [u8; 4] {
+fn edge_pixel(x: i32, y: i32, width: i32, height: i32, strength: f32) -> [u8; 4] {
     let dx = (SHADOW - x).max(x - (SHADOW + width - 1)).max(0) as f32;
     let dy = (SHADOW - y).max(y - (SHADOW + height - 1)).max(0) as f32;
     let distance = (dx * dx + dy * dy).sqrt();
     let offset = (distance - 1.0).max(0.0);
     let glow = ((65.0 * (-offset * offset / 18.0).exp() + 45.0 * (-offset * offset / 0.8).exp())
-        * ((10.0 - distance) / 9.0).clamp(0.0, 1.0))
-    .round() as u32;
+        * ((10.0 - distance) / 9.0).clamp(0.0, 1.0)
+        * strength)
+        .round()
+        .min(255.0) as u32;
     let shadow = u32::from(shadow_alpha(x, y, width, height));
     [
         (235 * glow / 255) as u8,
@@ -205,10 +244,12 @@ pub(super) fn is_at(point: (i32, i32)) -> bool {
         return false;
     }
     unsafe {
-        let hwnd = WindowFromPoint(POINT {
+        let window = WindowFromPoint(POINT {
             x: point.0,
             y: point.1,
         });
+        // 工具栏按钮和保存对话框都是贴图的所属窗口，沿 owner 链一并放行。
+        let hwnd = GetAncestor(window, GA_ROOTOWNER);
         !hwnd.is_invalid() && !GetPropW(hwnd, w!("NextGesturesQuickPin")).is_invalid()
     }
 }
@@ -252,7 +293,11 @@ fn capture(b: Bounds) -> Result<Picture> {
         surface: raw,
         alpha: 255,
         wheel_remainder: 0,
+        exporting: false,
+        selected: false,
+        ink: ink::Annotate::default(),
     };
+    picture.ink = ink::Annotate::new(picture.pixels.clone(), bar::SWATCHES[0]);
     picture.surface = picture.compose(view)?;
     Ok(picture)
 }
@@ -328,7 +373,9 @@ fn toggle_fold(hwnd: HWND, click: POINT) -> Result<()> {
         p.folded = !p.folded;
         Ok(position)
     })?;
-    render(hwnd, Some(position))
+    render(hwnd, Some(position))?;
+    // 折叠后的小图视为失活；展开后若仍在前台则重新选中，工具栏跟随新位置。
+    update_selection(hwnd)
 }
 
 fn hit_test(hwnd: HWND, point: POINT) -> LRESULT {
@@ -336,15 +383,16 @@ fn hit_test(hwnd: HWND, point: POINT) -> LRESULT {
     if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
         return LRESULT(HTTRANSPARENT as isize);
     }
-    let (width, height) = PICTURE.with(|p| {
+    let (width, height, drawing) = PICTURE.with(|p| {
         let p = p.borrow();
         let p = p.as_ref().unwrap();
-        (p.view.width, p.view.height)
+        (p.view.width, p.view.height, p.ink.tool.is_some() && !p.folded)
     });
     if (rect.left + SHADOW..rect.left + SHADOW + width).contains(&point.x)
         && (rect.top + SHADOW..rect.top + SHADOW + height).contains(&point.y)
     {
-        LRESULT(HTCAPTION as isize)
+        // 涂鸦模式下内容区作为客户区接收鼠标，否则整张图可拖动。
+        LRESULT(if drawing { HTCLIENT } else { HTCAPTION } as isize)
     } else {
         LRESULT(HTTRANSPARENT as isize)
     }
@@ -413,12 +461,18 @@ pub fn open_after_capture(bounds: Bounds, captured: impl FnOnce()) -> Result<()>
                         y: bounds.y - SHADOW,
                     }),
                 )?;
+                super::pin_toolbar::create(hwnd, 255)?;
+                let scale = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
+                with_picture(|p| p.ink.scale = scale);
                 Ok(())
             })() {
                 let _ = DestroyWindow(hwnd);
                 return Err(e);
             }
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            let _ = ShowWindow(hwnd, SW_SHOW);
+            // 截图完成即选中：辉光变亮、工具栏出现，可直接涂鸦或 Ctrl+C。
+            ink::activate(hwnd);
+            let _ = PostMessageW(Some(hwnd), bar::SELECTION, WPARAM(0), LPARAM(0));
             let mut msg = MSG::default();
             loop {
                 let status = GetMessageW(&mut msg, None, 0, 0).0;
@@ -428,6 +482,18 @@ pub fn open_after_capture(bounds: Bounds, captured: impl FnOnce()) -> Result<()>
                 }
                 if status == 0 {
                     break;
+                }
+                // 文字编辑中的按键 / 字符（含输入法）优先。
+                if ink::pump(hwnd, &msg) {
+                    continue;
+                }
+                // 贴图或其工具栏获得焦点时的快捷键（类似 Snipaste）。
+                if let Some(id) = ink::shortcut(&msg) {
+                    command(hwnd, id);
+                    continue;
+                }
+                if super::pin_toolbar::translate(&msg) {
+                    continue;
                 }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
@@ -441,6 +507,27 @@ pub fn open_after_capture(bounds: Bounds, captured: impl FnOnce()) -> Result<()>
     result
 }
 
+/// 前台窗口属于本贴图（自身或其所属窗口）且未折叠时为选中：辉光变亮并显示工具栏。
+fn update_selection(hwnd: HWND) -> Result<()> {
+    let owned = unsafe {
+        let foreground = GetForegroundWindow();
+        !foreground.is_invalid()
+            && (foreground == hwnd || GetAncestor(foreground, GA_ROOTOWNER) == hwnd)
+    };
+    let (changed, selected) = with_picture(|p| -> Result<(bool, bool)> {
+        let selected = owned && !p.folded;
+        if p.selected == selected {
+            return Ok((false, selected));
+        }
+        p.selected = selected;
+        p.surface = p.compose(p.view)?;
+        p.paint_view();
+        Ok((true, selected))
+    })?;
+    bar::show(selected);
+    if changed { render(hwnd, None) } else { Ok(()) }
+}
+
 fn point(lp: LPARAM) -> POINT {
     POINT {
         x: (lp.0 as u16) as i16 as i32,
@@ -452,9 +539,150 @@ fn report_render_error(result: Result<()>) {
         log::error!("更新贴图失败: {e:#}");
     }
 }
+
+fn save_png(owner: HWND, bytes: &[u8]) -> Result<bool> {
+    use windows::Win32::UI::Controls::Dialogs::*;
+    use windows::core::{PCWSTR, PWSTR};
+    let mut path = [0u16; 32768];
+    let name: Vec<_> = "贴图.png".encode_utf16().collect();
+    path[..name.len()].copy_from_slice(&name);
+    let filter: Vec<_> = "PNG 图片\0*.png\0\0".encode_utf16().collect();
+    let mut dialog = OPENFILENAMEW {
+        lStructSize: size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: owner,
+        lpstrTitle: w!("保存贴图"),
+        lpstrFile: PWSTR(path.as_mut_ptr()),
+        nMaxFile: path.len() as u32,
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        lpstrDefExt: w!("png"),
+        Flags: OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+        ..Default::default()
+    };
+    if !unsafe { GetSaveFileNameW(&mut dialog) }.as_bool() {
+        let error = unsafe { CommDlgExtendedError() };
+        ensure!(error.0 == 0, "保存对话框失败：{error:?}");
+        return Ok(false);
+    }
+    let length = path.iter().position(|&c| c == 0).unwrap_or(path.len());
+    std::fs::write(
+        std::path::PathBuf::from(String::from_utf16_lossy(&path[..length])),
+        bytes,
+    )?;
+    Ok(true)
+}
+
+fn command(hwnd: HWND, id: u16) {
+    if PICTURE.with(|p| p.borrow().as_ref().is_none_or(|p| p.exporting)) {
+        return;
+    }
+    let result = (|| -> Result<()> {
+        match id {
+            bar::COPY => {
+                ink::settle(hwnd)?;
+                let (width, height, pixels) = PICTURE.with(|p| {
+                    let p = p.borrow();
+                    let p = p.as_ref().unwrap();
+                    (p.width, p.height, p.pixels.clone())
+                });
+                super::clipboard::set_image_bgra(hwnd, width, height, &pixels)?;
+                bar::feedback(bar::COPY);
+            }
+            bar::SAVE => {
+                ink::settle(hwnd)?;
+                let bytes = PICTURE.with(|p| p.borrow().as_ref().unwrap().png())?;
+                PICTURE.with(|p| p.borrow_mut().as_mut().unwrap().exporting = true);
+                bar::busy(true);
+                let saved = save_png(hwnd, &bytes);
+                PICTURE.with(|p| p.borrow_mut().as_mut().unwrap().exporting = false);
+                bar::busy(false);
+                if saved? {
+                    bar::feedback(bar::SAVE);
+                }
+            }
+            bar::LESS | bar::MORE => {
+                let alpha = PICTURE.with(|p| {
+                    let mut p = p.borrow_mut();
+                    let p = p.as_mut().unwrap();
+                    p.alpha = (i32::from(p.alpha) + if id == bar::LESS { -13 } else { 13 })
+                        .clamp(50, 255) as u8;
+                    p.alpha
+                });
+                render(hwnd, None)?;
+                bar::alpha(alpha);
+            }
+            bar::CLOSE => unsafe {
+                DestroyWindow(hwnd)?;
+            },
+            _ => {
+                ink::command(hwnd, id)?;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(e) = result {
+        log::error!("贴图操作失败: {e:#}");
+        bar::error(&format!("{e:#}"));
+    }
+}
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         match message {
+            super::pin_toolbar::COMMAND => {
+                command(hwnd, wp.0 as u16);
+                LRESULT(0)
+            }
+            WM_ACTIVATE => {
+                // 激活切换完成后再判断前台窗口，工具栏 / 文字框 / 对话框都算选中。
+                let _ = PostMessageW(Some(hwnd), bar::SELECTION, WPARAM(0), LPARAM(0));
+                DefWindowProcW(hwnd, message, wp, lp)
+            }
+            bar::SELECTION => {
+                report_render_error(update_selection(hwnd));
+                LRESULT(0)
+            }
+            WM_MOUSEMOVE => {
+                report_render_error(ink::pointer_move(hwnd, point(lp), wp.0 & 0x0004 != 0));
+                LRESULT(0)
+            }
+            WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
+                report_render_error(ink::pointer_down(hwnd, point(lp)));
+                LRESULT(0)
+            }
+            WM_LBUTTONUP => {
+                report_render_error(ink::pointer_up(hwnd));
+                LRESULT(0)
+            }
+            WM_SETCURSOR
+                if (lp.0 & 0xffff) as u32 == HTCLIENT && with_picture(|p| p.ink.tool.is_some()) =>
+            {
+                let mut cursor = POINT::default();
+                if GetCursorPos(&mut cursor).is_ok() {
+                    let _ = ScreenToClient(hwnd, &mut cursor);
+                    if let Some(handle) = ink::cursor_for(hwnd, cursor) {
+                        SetCursor(Some(handle));
+                        return LRESULT(1);
+                    }
+                }
+                DefWindowProcW(hwnd, message, wp, lp)
+            }
+            WM_CHAR if ink::editing() => {
+                report_render_error(ink::char_input(hwnd, wp.0 as u16));
+                LRESULT(0)
+            }
+            windows::Win32::UI::Controls::WM_MOUSELEAVE => {
+                report_render_error(ink::mouse_leave(hwnd));
+                LRESULT(0)
+            }
+            WM_TIMER if wp.0 == ink::CARET_TIMER => {
+                report_render_error(ink::caret_tick(hwnd));
+                LRESULT(0)
+            }
+            WM_WINDOWPOSCHANGED => {
+                if let Err(e) = super::pin_toolbar::position() {
+                    log::warn!("贴图工具栏定位失败: {e}");
+                }
+                DefWindowProcW(hwnd, message, wp, lp)
+            }
             WM_NCHITTEST => hit_test(hwnd, point(lp)),
             // HTCAPTION 左键交给 DefWindowProc 的系统移动循环。
             WM_NCLBUTTONDBLCLK => {
@@ -462,15 +690,31 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
                 LRESULT(0)
             }
             WM_NCRBUTTONDOWN | WM_RBUTTONDOWN => LRESULT(0),
+            // 涂鸦模式右键：结束折线 / 提交文字 / 退出涂鸦，不关闭贴图。
+            WM_RBUTTONUP if with_picture(|p| p.ink.tool.is_some()) => {
+                let result = ink::right_click(hwnd);
+                report_render_error(result);
+                LRESULT(0)
+            }
             WM_NCRBUTTONUP | WM_RBUTTONUP | WM_CLOSE => {
                 let _ = DestroyWindow(hwnd);
                 LRESULT(0)
             }
             WM_KEYDOWN if wp.0 == 27 => {
-                let _ = DestroyWindow(hwnd);
+                command(hwnd, ink::ESCAPE);
                 LRESULT(0)
             }
+
             WM_MOUSEWHEEL => {
+                // 涂鸦模式下调粗细 / 字号，否则（含失活贴图）调透明度。
+                match ink::wheel(hwnd, ((wp.0 >> 16) as u16) as i16 as i32) {
+                    Ok(true) => return LRESULT(0),
+                    Ok(false) => {}
+                    Err(e) => {
+                        report_render_error(Err(e));
+                        return LRESULT(0);
+                    }
+                }
                 let changed = PICTURE.with(|p| {
                     let mut p = p.borrow_mut();
                     let p = p.as_mut().unwrap();
@@ -484,6 +728,8 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
                 });
                 if changed {
                     report_render_error(render(hwnd, None));
+                    let alpha = PICTURE.with(|p| p.borrow().as_ref().unwrap().alpha);
+                    super::pin_toolbar::alpha(alpha);
                 }
                 LRESULT(0)
             }
@@ -528,15 +774,45 @@ mod tests {
         assert_eq!(shadow_alpha(239, 139, 200, 100), 0);
         assert!(shadow_alpha(19, 70, 200, 100) > shadow_alpha(10, 70, 200, 100));
         assert!(shadow_alpha(19, 70, 200, 100) < 255);
-        assert_eq!(edge_pixel(0, 0, 200, 100), [0; 4]);
-        let edge = edge_pixel(19, 70, 200, 100);
+        assert_eq!(edge_pixel(0, 0, 200, 100, 1.0), [0; 4]);
+        let edge = edge_pixel(19, 70, 200, 100, 1.0);
         assert!(edge[0] > edge[1] && edge[1] > edge[2]);
         assert!(edge[..3].iter().all(|&channel| channel <= edge[3]));
-        assert!(edge[0] > edge_pixel(12, 70, 200, 100)[0]);
+        assert!(edge[0] > edge_pixel(12, 70, 200, 100, 1.0)[0]);
+    }
+
+    #[test]
+    fn png_export_keeps_full_original_pixels_when_folded_and_translucent() {
+        let picture = Picture {
+            pixels: vec![0, 0, 255, 255, 255, 0, 0, 255],
+            width: 1,
+            height: 2,
+            view: View {
+                x: 0,
+                y: 1,
+                width: 1,
+                height: 1,
+            },
+            folded: true,
+            surface: Surface::new(1, 1).unwrap(),
+            alpha: 50,
+            wheel_remainder: 0,
+            exporting: false,
+            selected: false,
+            ink: ink::Annotate::default(),
+        };
+        let bytes = picture.png().unwrap();
+        let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
+            .read_info()
+            .unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut pixels).unwrap();
+        assert_eq!((info.width, info.height), (1, 2));
+        assert_eq!(pixels, vec![255, 0, 0, 255, 0, 0, 255, 255]);
     }
     #[test]
     #[ignore = "opens a real desktop pin window; run alone"]
-    fn desktop_pin_native_drag_fold_opacity_and_right_close() {
+    fn desktop_pin_toolbar_fold_opacity_save_cancel_and_close() {
         use std::time::{Duration, Instant};
         unsafe extern "system" fn backdrop_proc(
             hwnd: HWND,
@@ -647,6 +923,31 @@ mod tests {
             DestroyWindow(backdrop.1).unwrap();
             let initial_pixel = await_gray(150, 150, 0);
             let shadow_pixel = gray(99, 180);
+            // 截图后贴图立即激活，工具栏随之出现。
+            let toolbar = FindWindowW(w!("NextGesturesPinToolbar"), None).unwrap();
+            let _ = SetForegroundWindow(hwnd);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !IsWindowVisible(toolbar).as_bool() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let toolbar_visible = IsWindowVisible(toolbar).as_bool();
+            let mut toolbar_rect = RECT::default();
+            GetWindowRect(toolbar, &mut toolbar_rect).unwrap();
+            let toolbar_native = is_at((toolbar_rect.left + 20, toolbar_rect.top + 15));
+            SendMessageW(
+                GetDlgItem(Some(toolbar), i32::from(super::super::pin_toolbar::LESS)).unwrap(),
+                BM_CLICK,
+                None,
+                None,
+            );
+            let lower_opacity_pixel = await_gray(150, 150, 13);
+            SendMessageW(
+                GetDlgItem(Some(toolbar), i32::from(super::super::pin_toolbar::MORE)).unwrap(),
+                BM_CLICK,
+                None,
+                None,
+            );
+            let opaque_again = await_gray(150, 150, 0);
             if let Ok(directory) = std::env::var("NEXTGESTURES_PIN_EVIDENCE") {
                 let mut snapshot = capture(Bounds {
                     x: 70,
@@ -711,11 +1012,48 @@ mod tests {
             );
             let pixel = await_gray(170, 180, 5);
             SendMessageW(
-                hwnd,
-                WM_NCRBUTTONUP,
-                Some(WPARAM(HTCAPTION as usize)),
-                Some(packed(160, 170)),
+                GetDlgItem(Some(toolbar), i32::from(super::super::pin_toolbar::SAVE)).unwrap(),
+                BM_CLICK,
+                None,
+                None,
             );
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut cancelled = false;
+            loop {
+                if let Ok(dialog) = FindWindowW(w!("#32770"), w!("保存贴图")) {
+                    if GetWindow(dialog, GW_OWNER).ok() == Some(hwnd) {
+                        SendMessageW(dialog, WM_CLOSE, None, None);
+                        cancelled = true;
+                        break;
+                    }
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            if cancelled {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while !IsWindowVisible(toolbar).as_bool() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                SendMessageW(
+                    GetDlgItem(Some(toolbar), i32::from(super::super::pin_toolbar::CLOSE)).unwrap(),
+                    BM_CLICK,
+                    None,
+                    None,
+                );
+            } else {
+                SendMessageW(hwnd, WM_CLOSE, None, None);
+            }
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while IsWindow(Some(hwnd)).as_bool() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let toolbar_closed = !IsWindow(Some(hwnd)).as_bool();
+            if !toolbar_closed {
+                SendMessageW(hwnd, WM_CLOSE, None, None);
+            }
             (
                 topmost,
                 hit,
@@ -727,6 +1065,14 @@ mod tests {
                 pixel,
                 initial_pixel,
                 shadow_pixel,
+                toolbar_visible,
+                toolbar_rect,
+                lower_opacity_pixel,
+                opaque_again,
+                cancelled,
+                toolbar,
+                toolbar_closed,
+                toolbar_native,
             )
         };
         worker.join().unwrap().unwrap();
@@ -783,8 +1129,19 @@ mod tests {
             evidence.9
         );
         assert_eq!(COUNT.load(Ordering::Relaxed), 0);
+        assert!(evidence.10);
+        assert!(evidence.11.top >= 260);
+        assert!((evidence.12 & 255).abs_diff(13) <= 2);
+        assert!((evidence.13 & 255) <= 2);
+        assert!(evidence.14, "save dialog did not cancel cleanly");
+        assert!(!unsafe { IsWindow(Some(evidence.15)) }.as_bool());
+        assert!(evidence.16, "toolbar close command did not close the pin");
+        assert!(
+            evidence.17,
+            "toolbar controls did not bypass the gesture hook"
+        );
         println!(
-            "Desktop pin: native caption hit, transparent shadow hit, topmost, fold=104x104, moved restore=280x200, right-close released resources"
+            "Desktop pin: toolbar visible, opacity buttons update pixels, original fold/restore, save cancellation, toolbar close released resources"
         );
     }
 }
