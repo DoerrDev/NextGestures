@@ -12,13 +12,13 @@ import {
 } from 'lucide-react'
 import {
   api,
-  isBuiltinGesture,
   REGIONS,
   TRIGGERS,
   type FireMode,
   type Gesture,
   type LivePayload,
   type Point,
+  type Plugins,
   type RecordedPayload,
 } from '../api'
 import { t } from '../i18n'
@@ -27,6 +27,7 @@ import { StrokeCanvas } from './StrokeCanvas'
 
 interface Props {
   initial: Gesture
+  plugins: Plugins
   isNew: boolean
   onSave: (gesture: Gesture) => void
   onClose: () => void
@@ -43,7 +44,7 @@ const TRIGGER_LABEL: Record<string, string> = {
   X2: '侧键 2',
 }
 
-export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelete, onDuplicate }: Props) {
+export function GesturePane({ initial, plugins, isNew, onSave, onClose, onToggle, onDelete, onDuplicate }: Props) {
   const [draft, setDraft] = useState<Gesture>(initial)
   const [recording, setRecording] = useState(false)
   const [live, setLive] = useState<LivePayload | null>(null)
@@ -117,6 +118,7 @@ export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelet
   }
 
   const recorded = draft.points.length > 0 || draft.wheel.length > 0
+  const onReleaseOnly = draft.left_click || ['screenshot', 'record_region', 'ai_jyutping', 'ai_translate', 'ai_polish'].includes(draft.action.kind)
 
   const submit = () => {
     if (!draft.name.trim()) return setError(t('needName'))
@@ -125,27 +127,6 @@ export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelet
     if (draft.region && draft.points.length > 0) return setError(t('regionWheelOnly'))
     onSave({ ...draft, name: draft.name.trim() })
   }
-
-  if (isBuiltinGesture(initial)) return (
-    <aside className="pane">
-      <div className="pane-head">
-        <h2>{initial.name}<span className="tag blue builtin-tag">内置</span></h2>
-        <button type="button" className="btn-icon" onClick={onClose} title={t('cancel')}><X size={16} /></button>
-      </div>
-      <div className="pane-body">
-        <StrokeCanvas className="frame" points={initial.points} trigger={initial.trigger} color="#6fc2ff" />
-        <p>按住鼠标右键，沿下 → 右 → 上 → 左圈住内容，松开即生成置顶贴图。</p>
-        <p className="field-note" style={{ marginTop: 12 }}>内置手势仅支持开启或关闭。</p>
-        <details className="field-note" style={{ marginTop: 12 }}><summary>贴图操作</summary>鼠标移到贴图上，使用底部工具栏复制原图、保存 PNG、调透明度或关闭。拖动移动，双击折叠或恢复，右键关闭。</details>
-      </div>
-      <div className="pane-foot">
-        <button type="button" className="btn-ghost" onClick={() => onToggle(initial)}>
-          {initial.enabled ? <PowerOff size={14} /> : <Power size={14} />}
-          {initial.enabled ? t('disable') : t('enable')}
-        </button>
-      </div>
-    </aside>
-  )
 
   return (
     <aside className="pane">
@@ -234,8 +215,8 @@ export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelet
             <label htmlFor="g-fire">{t('fireMode')}</label>
             <select
               id="g-fire"
-              value={draft.left_click ? 'OnRelease' : draft.fire_mode}
-              disabled={draft.left_click}
+              value={onReleaseOnly ? 'OnRelease' : draft.fire_mode}
+              disabled={onReleaseOnly}
               onChange={(e) => setDraft({ ...draft, fire_mode: e.target.value as FireMode })}
             >
               <option value="OnRelease">{t('onRelease')}</option>
@@ -252,6 +233,7 @@ export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelet
         <h3 className="pane-sect">{t('action')}</h3>
         <ActionEditor
           action={draft.action}
+          plugins={plugins}
           onChange={(action) => setDraft({ ...draft, action })}
           onError={setError}
         />

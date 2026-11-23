@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering::Relaxed;
 
-use gesture_core::{Action, Config, Gesture, Profile, Settings};
+use gesture_core::{Action, Config, Gesture, PluginSettings, Profile, Settings};
 use gesture_platform::{hook, window};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -54,6 +54,13 @@ pub fn save_settings(app: AppHandle, state: State<AppState>, mut settings: Setti
     // 「触发提示置顶」立即生效，不必等下一次手势
     let _ = crate::overlay::apply_z_order(&app);
     Ok(())
+}
+
+#[tauri::command]
+pub fn set_plugins(app: AppHandle, state: State<AppState>, plugins: PluginSettings) -> R<()> {
+    state.config.write().unwrap().plugins = plugins;
+    commit(&app)?;
+    app.emit("config:changed", ()).map_err(err)
 }
 
 #[tauri::command]
@@ -176,8 +183,11 @@ pub fn virtual_screen_size(app: AppHandle) -> VirtualScreenSize {
 }
 
 #[tauri::command]
-pub fn test_action(action: Action) -> R<()> {
-    crate::action::run(&action).map_err(|e| format!("{e:#}"))
+pub async fn test_action(app: AppHandle, action: Action) -> R<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::action::run(&app, &action))
+        .await
+        .map_err(err)?
+        .map_err(|e| format!("{e:#}"))
 }
 
 /// 设置页打开「触发提示」时向实际桌面 overlay 投送预览，不写入配置。

@@ -16,7 +16,11 @@ export type Point = [number, number]
 
 export type Action =
   | { kind: 'none' }
-  | { kind: 'pin_screenshot' }
+  | { kind: 'screenshot' }
+  | { kind: 'record_region' }
+  | { kind: 'ai_jyutping' }
+  | { kind: 'ai_translate' }
+  | { kind: 'ai_polish' }
   | { kind: 'command'; program: string; args: string[]; shell: boolean }
   | { kind: 'hotkey'; keys: string[] }
   | { kind: 'key_sequence'; steps: string[][] }
@@ -38,8 +42,6 @@ export interface Gesture {
   times: number[]
   action: Action
 }
-
-export const isBuiltinGesture = (gesture: Gesture) => gesture.id === 'builtin-pin-screenshot'
 
 export interface Profile {
   id: string
@@ -74,6 +76,18 @@ export interface Config {
   version: number
   settings: Settings
   profiles: Profile[]
+  plugins: Plugins
+}
+
+export interface Plugins {
+  screenshot: boolean
+  recorder: boolean
+  quickformater: boolean
+  ai: {
+    base_url: string
+    api_key: string
+    model: string
+  }
 }
 
 export interface RecordedPayload {
@@ -106,6 +120,7 @@ export const api = {
   getConfig: () => invoke<Config>('get_config'),
   configPath: () => invoke<string>('config_path'),
   saveSettings: (settings: Settings) => invoke<void>('save_settings', { settings }),
+  setPlugins: (plugins: Plugins) => invoke<void>('set_plugins', { plugins }),
   saveBlacklist: (names: string[]) => invoke<void>('save_blacklist', { names }),
   upsertGesture: (profileId: string, gesture: Gesture) =>
     invoke<void>('upsert_gesture', { profileId, gesture }),

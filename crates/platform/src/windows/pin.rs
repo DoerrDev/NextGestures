@@ -402,6 +402,25 @@ pub fn open(bounds: Bounds) -> Result<()> {
     open_after_capture(bounds, || {})
 }
 
+/// 框选后复用贴图窗口及标注工具栏。应在独立工作线程调用。
+pub fn select_and_open() -> Result<()> {
+    select_and_open_after_capture(|| {})
+}
+
+pub fn select_and_open_after_capture(captured: impl FnOnce()) -> Result<()> {
+    let region = super::region::select_region().map_err(anyhow::Error::msg)?;
+    if let Some((x, y, width, height)) = region {
+        let bounds = Bounds::from_points(&[(x, y), (x + width, y + height)])?;
+        open_after_capture(bounds, captured)
+    } else {
+        Ok(())
+    }
+}
+
+pub(super) fn activate_native_window(hwnd: HWND) {
+    ink::activate(hwnd);
+}
+
 /// 截取静态图片后立即通知调用方恢复轨迹层，不等贴图窗口关闭。
 pub fn open_after_capture(bounds: Bounds, captured: impl FnOnce()) -> Result<()> {
     ensure!(

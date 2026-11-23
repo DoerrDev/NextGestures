@@ -6,6 +6,8 @@ mod windows;
 
 #[cfg(windows)]
 pub use windows::{clipboard, hook, hotkey, input, pin, shell, window};
+#[cfg(windows)]
+pub use windows::region::select_region;
 
 /// 鼠标状态快照
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

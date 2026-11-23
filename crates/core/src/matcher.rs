@@ -1,4 +1,4 @@
-use crate::config::{Config, Gesture, Profile, Region, TriggerButton, WheelDir};
+use crate::config::{Config, Gesture, PluginSettings, Profile, Region, TriggerButton, WheelDir};
 use crate::recognizer::{self, Point};
 
 #[derive(Debug)]
@@ -37,7 +37,8 @@ pub fn best_above<'a>(
     let app = cfg.profiles.iter().filter(|p| matches_exe(p, exe));
     let global = cfg.profiles.iter().filter(|p| p.is_global());
 
-    best_of(app, input, threshold).or_else(|| best_of(global, input, threshold))
+    best_of(app, input, threshold, &cfg.plugins)
+        .or_else(|| best_of(global, input, threshold, &cfg.plugins))
 }
 
 fn matches_exe(p: &Profile, exe: &str) -> bool {
@@ -48,7 +49,7 @@ fn matches_exe(p: &Profile, exe: &str) -> bool {
 pub fn requires_release(cfg: &Config, exe: &str, button: Option<TriggerButton>) -> bool {
     button == Some(TriggerButton::Right) && cfg.profiles.iter().any(|p| {
         (p.is_global() || matches_exe(p, exe)) && p.gestures.iter().any(|g| {
-            g.enabled && g.trigger == Some(TriggerButton::Right) && g.left_click
+            g.enabled && cfg.plugins.allows(&g.action) && g.trigger == Some(TriggerButton::Right) && g.left_click
         })
     })
 }
@@ -58,11 +59,12 @@ fn best_of<'a, I: Iterator<Item = &'a Profile>>(
     profiles: I,
     input: Input<'_>,
     threshold: f32,
+    plugins: &PluginSettings,
 ) -> Option<Matched<'a>> {
     let mut best: Option<(bool, Matched<'a>)> = None;
     for p in profiles {
         for g in &p.gestures {
-            if !g.enabled || g.trigger != input.button || g.wheel != input.wheel
+            if !g.enabled || !plugins.allows(&g.action) || g.trigger != input.button || g.wheel != input.wheel
                 || g.left_click != input.left_click {
                 continue;
             }
@@ -123,7 +125,7 @@ mod tests {
 
     fn cfg_with_app() -> (Config, Vec<Point>) {
         let stroke = recognizer::normalize(&line([0.0, 0.0], [200.0, 0.0])).unwrap();
-        let mut cfg = Config { version: 1, settings: Default::default(), profiles: vec![] };
+        let mut cfg = Config { profiles: vec![], ..Config::default() };
         cfg.profiles.push(Profile {
             id: "global".into(),
             name: "Global".into(),
@@ -171,6 +173,16 @@ mod tests {
         cfg.profile_mut("ps").unwrap().gestures[0].enabled = false;
         let m = best(&cfg, "photoshop.exe", input(TriggerButton::Right, &stroke)).unwrap();
         assert_eq!(m.gesture.id, "g-right");
+    }
+
+    #[test]
+    fn disabled_plugin_gesture_releases_priority_without_deleting_the_mapping() {
+        let (mut cfg, stroke) = cfg_with_app();
+        cfg.profile_mut("ps").unwrap().gestures[0].action = Action::Screenshot;
+        let input = input(TriggerButton::Right, &stroke);
+        assert_eq!(best(&cfg, "photoshop.exe", input).unwrap().gesture.id, "g-right");
+        cfg.plugins.screenshot = true;
+        assert_eq!(best(&cfg, "photoshop.exe", input).unwrap().gesture.id, "ps-right");
     }
 
     #[test]

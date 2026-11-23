@@ -1,25 +1,38 @@
 import { Play } from 'lucide-react'
-import { api, type Action } from '../api'
-import { t } from '../i18n'
+import { api, type Action, type Plugins } from '../api'
+import { t, type Key } from '../i18n'
 import { HotkeyRecorder } from './HotkeyRecorder'
 
 interface Props {
   action: Action
+  plugins: Plugins
   onChange: (action: Action) => void
   onError: (msg: string) => void
 }
 
-const KINDS: Action['kind'][] = ['none', 'pin_screenshot', 'command', 'hotkey', 'key_sequence', 'open_url', 'lua']
-
-const KIND_LABEL: Record<Action['kind'], () => string> = {
-  pin_screenshot: () => '快速截图并置顶',
-  none: () => t('actionNone'),
-  command: () => t('actionCommand'),
-  hotkey: () => t('actionHotkey'),
-  key_sequence: () => t('actionKeySequence'),
-  open_url: () => t('actionOpenUrl'),
-  lua: () => t('actionLua'),
+const PLUGIN_FOR_ACTION: Partial<Record<Action['kind'], 'screenshot' | 'recorder' | 'quickformater'>> = {
+  screenshot: 'screenshot',
+  record_region: 'recorder',
+  ai_jyutping: 'quickformater',
+  ai_translate: 'quickformater',
+  ai_polish: 'quickformater',
 }
+
+const KIND_LABEL: Record<Action['kind'], Key> = {
+  none: 'actionNone',
+  command: 'actionCommand',
+  hotkey: 'actionHotkey',
+  key_sequence: 'actionKeySequence',
+  open_url: 'actionOpenUrl',
+  lua: 'actionLua',
+  screenshot: 'actionScreenshot',
+  record_region: 'actionRecordRegion',
+  ai_jyutping: 'actionAiJyutping',
+  ai_translate: 'actionAiTranslate',
+  ai_polish: 'actionAiPolish',
+}
+
+const KINDS = Object.keys(KIND_LABEL) as Action['kind'][]
 
 const LUA_TEMPLATE = `-- ng.send_keys("ctrl+w")        发送组合键
 -- ng.run(prog, {arg1, arg2})   启动进程（不显示控制台）
@@ -38,7 +51,11 @@ ng.send_keys("alt+tab")
 
 function blank(kind: Action['kind']): Action {
   switch (kind) {
-    case 'pin_screenshot':
+    case 'screenshot':
+    case 'record_region':
+    case 'ai_jyutping':
+    case 'ai_translate':
+    case 'ai_polish':
       return { kind }
     case 'command':
       return { kind, program: '', args: [], shell: false }
@@ -61,7 +78,10 @@ const parseKeys = (text: string) =>
     .map((s) => s.trim())
     .filter(Boolean)
 
-export function ActionEditor({ action, onChange, onError }: Props) {
+export function ActionEditor({ action, plugins, onChange, onError }: Props) {
+  const currentPlugin = PLUGIN_FOR_ACTION[action.kind]
+  const isDisabled = currentPlugin !== undefined && !plugins[currentPlugin]
+
   const test = async () => {
     try {
       await api.testAction(action)
@@ -79,18 +99,28 @@ export function ActionEditor({ action, onChange, onError }: Props) {
           value={action.kind}
           onChange={(e) => onChange(blank(e.target.value as Action['kind']))}
         >
-          {KINDS.map((k) => (
-            <option key={k} value={k}>
-              {KIND_LABEL[k]()}
-            </option>
-          ))}
+          {KINDS.map((kind) => {
+            const plugin = PLUGIN_FOR_ACTION[kind]
+            const disabled = plugin !== undefined && !plugins[plugin]
+            return (
+              <option key={kind} value={kind} disabled={disabled}>
+                {t(KIND_LABEL[kind])}{disabled ? ` · ${t('pluginDisabled')}` : ''}
+              </option>
+            )
+          })}
         </select>
       </div>
 
-      {action.kind === 'pin_screenshot' && <>
-        <p className="field-note">录制下 → 右 → 上 → 左的方框手势。圈住内容，松开即生成置顶贴图。</p>
-        <details className="field-note"><summary>贴图操作</summary>鼠标移到贴图上，可用底部工具栏复制原图、保存 PNG、调透明度或关闭。拖动移动，双击折叠或恢复，右键或 Esc 关闭。</details>
-      </>}
+      {isDisabled && <p className="field-note">{t('pluginDisabledHint')}</p>}
+      {action.kind === 'screenshot' && !isDisabled && (
+        <p className="field-note">{t('screenshotActionHint')}</p>
+      )}
+      {action.kind === 'record_region' && !isDisabled && (
+        <p className="field-note">{t('recordActionHint')}</p>
+      )}
+      {currentPlugin === 'quickformater' && !isDisabled && (
+        <p className="field-note">{t('aiActionHint')}</p>
+      )}
 
       {action.kind === 'command' && (
         <>
@@ -184,7 +214,7 @@ export function ActionEditor({ action, onChange, onError }: Props) {
         </div>
       )}
 
-      {action.kind !== 'none' && action.kind !== 'pin_screenshot' && (
+      {action.kind !== 'none' && currentPlugin === undefined && (
         <button type="button" className="btn-outline subtle" onClick={test}>
           <Play size={16} strokeWidth={2} />
           {t('test')}
@@ -196,8 +226,6 @@ export function ActionEditor({ action, onChange, onError }: Props) {
 
 export function describeAction(action: Action): string {
   switch (action.kind) {
-    case 'pin_screenshot':
-      return '快速截图并置顶'
     case 'command':
       return `${action.program} ${action.args.join(' ')}`.trim()
     case 'hotkey':
@@ -209,6 +237,6 @@ export function describeAction(action: Action): string {
     case 'lua':
       return action.code.split('\n')[0] ?? 'lua'
     default:
-      return t('actionNone')
+      return t(KIND_LABEL[action.kind])
   }
 }

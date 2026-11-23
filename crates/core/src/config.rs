@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::recognizer::{self, Point};
 
-pub const BUILTIN_PIN_ID: &str = "builtin-pin-screenshot";
+const LEGACY_BUILTIN_PIN_ID: &str = "builtin-pin-screenshot";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TriggerButton {
@@ -62,12 +62,16 @@ pub enum FireMode {
     Immediate,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
     None,
-    /// 将本次手势的原始屏幕范围截成置顶贴图，统一在松键后执行。
-    PinScreenshot,
+    #[serde(alias = "pin_screenshot")]
+    Screenshot,
+    RecordRegion,
+    AiJyutping,
+    AiTranslate,
+    AiPolish,
     /// 执行程序 / CMD 命令
     Command {
         program: String,
@@ -92,7 +96,13 @@ impl Default for Action {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl Action {
+    pub fn is_ai(&self) -> bool {
+        matches!(self, Self::AiJyutping | Self::AiTranslate | Self::AiPolish)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Gesture {
     pub id: String,
     pub name: String,
@@ -268,6 +278,43 @@ impl Default for Settings {
     }
 }
 
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AiSettings {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+}
+
+impl std::fmt::Debug for AiSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AiSettings")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PluginSettings {
+    pub screenshot: bool,
+    pub recorder: bool,
+    pub quickformater: bool,
+    pub ai: AiSettings,
+}
+
+impl PluginSettings {
+    pub fn allows(&self, action: &Action) -> bool {
+        match action {
+            Action::Screenshot => self.screenshot,
+            Action::RecordRegion => self.recorder,
+            Action::AiJyutping | Action::AiTranslate | Action::AiPolish => self.quickformater,
+            _ => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "version")]
@@ -275,12 +322,24 @@ pub struct Config {
     #[serde(default)]
     pub settings: Settings,
     #[serde(default)]
+    pub plugins: PluginSettings,
+    #[serde(default)]
     pub profiles: Vec<Profile>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { version: version(), settings: Settings::default(), profiles: vec![seed_global()] }
+        Self {
+            version: version(),
+            settings: Settings::default(),
+            plugins: PluginSettings::default(),
+            profiles: vec![Profile {
+                id: "global".into(),
+                name: "Global".into(),
+                exe: String::new(),
+                gestures: vec![],
+            }],
+        }
     }
 }
 
@@ -298,25 +357,27 @@ impl Config {
         if !cfg.profiles.iter().any(|p| p.is_global()) {
             cfg.profiles.insert(0, Profile { id: "global".into(), name: "Global".into(), exe: String::new(), gestures: vec![] });
         }
-        cfg.ensure_builtin_pin();
+        cfg.migrate_legacy_builtins();
         Ok(cfg)
     }
 
-    /// 每次读取配置时恢复内置定义，只继承开关；升级时接管第一条旧版全局贴图。
-    fn ensure_builtin_pin(&mut self) {
-        let global = self.profiles.iter().position(Profile::is_global).unwrap();
-        let gestures = &self.profiles[global].gestures;
-        let existing = gestures.iter().find(|g| g.id == BUILTIN_PIN_ID)
-            .or_else(|| gestures.iter().find(|g| matches!(g.action, Action::PinScreenshot)));
-        let enabled = existing.is_none_or(|g| g.enabled);
-        let legacy_id = existing.map(|g| g.id.clone());
-        for (i, profile) in self.profiles.iter_mut().enumerate() {
-            profile.gestures.retain(|g| g.id != BUILTIN_PIN_ID
-                && !(i == global && legacy_id.as_deref() == Some(g.id.as_str())));
+    fn migrate_legacy_builtins(&mut self) {
+        let legacy_seeds = legacy_seed_gestures();
+        for profile in &mut self.profiles {
+            let is_global = profile.is_global();
+            profile.gestures.retain(|gesture| {
+                if gesture.id == LEGACY_BUILTIN_PIN_ID {
+                    return false;
+                }
+                // Keep the legacy tutorial rows if the user customized them.
+                !(is_global && legacy_seeds.iter().any(|seed| {
+                    seed.id == gesture.id && *gesture == Gesture {
+                        enabled: gesture.enabled,
+                        ..seed.clone()
+                    }
+                }))
+            });
         }
-        let mut builtin = builtin_pin();
-        builtin.enabled = enabled;
-        self.profiles[global].gestures.push(builtin);
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -339,7 +400,7 @@ impl Config {
         self.profiles
             .iter()
             .flat_map(|p| &p.gestures)
-            .filter(|g| g.enabled && g.trigger.is_none())
+            .filter(|g| g.enabled && g.trigger.is_none() && self.plugins.allows(&g.action))
             .filter_map(|g| g.region)
             .fold(0, |m, r| m | r.bit())
     }
@@ -350,11 +411,6 @@ impl Config {
 
     /// 覆盖式写入：存在同 id 则更新，否则追加
     pub fn upsert_gesture(&mut self, profile_id: &str, gesture: Gesture) -> Result<()> {
-        anyhow::ensure!(gesture.id != BUILTIN_PIN_ID, "内置手势仅支持开启或关闭");
-        anyhow::ensure!(
-            !matches!(gesture.action, Action::PinScreenshot) || (!gesture.points.is_empty() && gesture.trigger.is_some()),
-            "快速贴图需要按键轨迹，请先录制方框手势"
-        );
         anyhow::ensure!(
             !gesture.left_click || (gesture.trigger == Some(TriggerButton::Right) && !gesture.points.is_empty()),
             "终点左键点击需要右键轨迹"
@@ -370,7 +426,6 @@ impl Config {
     }
 
     pub fn remove_gesture(&mut self, profile_id: &str, gesture_id: &str) -> Result<()> {
-        anyhow::ensure!(gesture_id != BUILTIN_PIN_ID, "内置手势仅支持开启或关闭");
         let profile = self
             .profile_mut(profile_id)
             .with_context(|| format!("未找到配置组: {profile_id}"))?;
@@ -397,53 +452,37 @@ fn default_fire_mode() -> FireMode {
     FireMode::OnRelease
 }
 
-fn seed_global() -> Profile {
-    Profile {
-        id: "global".into(),
-        name: "Global".into(),
-        exe: String::new(),
-        gestures: vec![
-            Gesture {
-                id: "seed-e-notepad".into(),
-                name: "画 e 打开记事本".into(),
-                enabled: true,
-                deletable: true,
-                trigger: Some(TriggerButton::Right),
-                region: None,
-                wheel: vec![],
-                left_click: false,
-                fire_mode: FireMode::OnRelease,
-                points: recognizer::normalize(&shape_e()).unwrap_or_default(),
-                times: vec![],
-                action: Action::Command { program: "notepad.exe".into(), args: vec![], shell: false },
-            },
-            Gesture {
-                id: "seed-o-close".into(),
-                name: "画 O 关闭标签 (Ctrl+W)".into(),
-                enabled: true,
-                deletable: true,
-                trigger: Some(TriggerButton::Middle),
-                region: None,
-                wheel: vec![],
-                left_click: false,
-                fire_mode: FireMode::Immediate,
-                points: recognizer::normalize(&shape_o()).unwrap_or_default(),
-                times: vec![],
-                action: Action::Hotkey { keys: vec!["ctrl".into(), "w".into()] },
-            },
-            builtin_pin(),
-        ],
-    }
-}
-
-fn builtin_pin() -> Gesture {
-    Gesture {
-        id: BUILTIN_PIN_ID.into(), name: "快速截图并置顶".into(), enabled: true, deletable: false,
-        trigger: Some(TriggerButton::Right), region: None, wheel: vec![], left_click: false,
-        fire_mode: FireMode::OnRelease,
-        points: recognizer::normalize(&[[0.0,0.0],[0.0,100.0],[100.0,100.0],[100.0,0.0],[0.0,0.0]]).unwrap(),
-        times: vec![], action: Action::PinScreenshot,
-    }
+fn legacy_seed_gestures() -> [Gesture; 2] {
+    [
+        Gesture {
+            id: "seed-e-notepad".into(),
+            name: "画 e 打开记事本".into(),
+            enabled: true,
+            deletable: true,
+            trigger: Some(TriggerButton::Right),
+            region: None,
+            wheel: vec![],
+            left_click: false,
+            fire_mode: FireMode::OnRelease,
+            points: recognizer::normalize(&shape_e()).unwrap_or_default(),
+            times: vec![],
+            action: Action::Command { program: "notepad.exe".into(), args: vec![], shell: false },
+        },
+        Gesture {
+            id: "seed-o-close".into(),
+            name: "画 O 关闭标签 (Ctrl+W)".into(),
+            enabled: true,
+            deletable: true,
+            trigger: Some(TriggerButton::Middle),
+            region: None,
+            wheel: vec![],
+            left_click: false,
+            fire_mode: FireMode::Immediate,
+            points: recognizer::normalize(&shape_o()).unwrap_or_default(),
+            times: vec![],
+            action: Action::Hotkey { keys: vec!["ctrl".into(), "w".into()] },
+        },
+    ]
 }
 
 /// 顺时针整圈（屏幕坐标 y 向下）
@@ -472,14 +511,20 @@ fn arc(center: Point, r: f32, from_deg: f32, to_deg: f32, n: usize) -> Vec<Point
 mod tests {
     use super::*;
 
+    fn config_with_gestures() -> Config {
+        let mut cfg = Config::default();
+        cfg.profiles[0].gestures = legacy_seed_gestures().into();
+        cfg
+    }
+
     #[test]
     fn default_config_roundtrips_through_toml() {
         let cfg = Config::default();
         let text = toml::to_string_pretty(&cfg).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(back.profiles.len(), 1);
-        assert_eq!(back.profiles[0].gestures.len(), 3);
-        assert_eq!(back.profiles[0].gestures[0].points.len(), recognizer::NUM_POINTS);
+        assert!(back.profiles[0].gestures.is_empty());
+        assert_eq!(back.plugins, PluginSettings::default());
         assert_eq!(back.settings.move_threshold, 20);
     }
 
@@ -512,7 +557,7 @@ mod tests {
 
     #[test]
     fn endpoint_click_persists_and_old_configs_default_to_plain() {
-        let mut cfg = Config::default();
+        let mut cfg = config_with_gestures();
         cfg.profiles[0].gestures[0].left_click = true;
         let text = toml::to_string_pretty(&cfg).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
@@ -525,7 +570,7 @@ mod tests {
 
     #[test]
     fn endpoint_click_requires_right_stroke_when_saving() {
-        let mut cfg = Config::default();
+        let mut cfg = config_with_gestures();
         let mut g = cfg.profiles[0].gestures[0].clone();
         g.left_click = true;
         assert!(cfg.upsert_gesture("global", g.clone()).is_ok());
@@ -537,75 +582,55 @@ mod tests {
     }
 
     #[test]
-    fn seeded_e_and_o_are_distinguishable() {
-        let cfg = Config::default();
-        let e = &cfg.profiles[0].gestures[0].points;
-        let o = &cfg.profiles[0].gestures[1].points;
-        assert!(recognizer::score(e, o) < cfg.settings.match_threshold);
-    }
-
-    #[test]
     fn trigger_mask_bits() {
         let cfg = Config::default();
         assert_eq!(cfg.trigger_mask(), TriggerButton::Right.bit() | TriggerButton::Middle.bit());
     }
 
     #[test]
-    fn pin_action_roundtrips_and_requires_a_button_stroke() {
-        let mut cfg = Config::default();
-        let mut g = cfg.profiles[0].gestures[0].clone();
-        g.action = Action::PinScreenshot;
-        cfg.upsert_gesture("global", g.clone()).unwrap();
-        let back: Config = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
-        assert!(matches!(back.profiles[0].gestures[0].action, Action::PinScreenshot));
-        g.points.clear();
-        assert!(cfg.upsert_gesture("global", g.clone()).is_err());
-        g.points = vec![[0.0, 0.0], [100.0,100.0]];
-        g.trigger = None;
-        assert!(cfg.upsert_gesture("global", g).is_err());
-    }
-
-    #[test]
     fn remove_respects_deletable_flag() {
-        let mut cfg = Config::default();
+        let mut cfg = config_with_gestures();
         cfg.profiles[0].gestures[0].deletable = false;
         assert!(cfg.remove_gesture("global", "seed-e-notepad").is_err());
         assert!(cfg.remove_gesture("global", "seed-o-close").is_ok());
-        assert_eq!(cfg.profiles[0].gestures.len(), 2);
+        assert_eq!(cfg.profiles[0].gestures.len(), 1);
     }
 
     #[test]
-    fn builtin_pin_is_fixed_and_migration_preserves_toggle_without_duplicates() {
-        let mut cfg = Config::default();
-        let mut builtin = cfg.profiles[0].gestures.last().unwrap().clone();
-        assert_eq!(builtin.id, BUILTIN_PIN_ID);
-        builtin.enabled = false;
-        builtin.name = "tampered".into();
-        builtin.deletable = true;
-        assert!(cfg.upsert_gesture("global", builtin.clone()).is_err());
-        assert!(cfg.remove_gesture("global", BUILTIN_PIN_ID).is_err());
-        *cfg.profiles[0].gestures.last_mut().unwrap() = builtin;
-        cfg.ensure_builtin_pin();
-        cfg.ensure_builtin_pin();
-        let pins: Vec<_> = cfg.profiles[0].gestures.iter().filter(|g| g.id == BUILTIN_PIN_ID).collect();
-        assert_eq!(pins.len(), 1);
-        assert!(!pins[0].enabled && !pins[0].deletable);
-        assert_eq!(pins[0].name, "快速截图并置顶");
-        assert!(matches!(pins[0].action, Action::PinScreenshot));
-        cfg.profiles[0].gestures.last_mut().unwrap().id = "legacy-pin".into();
-        cfg.ensure_builtin_pin();
-        assert!(!cfg.profiles[0].gestures.last().unwrap().enabled);
-        assert!(!cfg.profiles[0].gestures.iter().any(|g| g.id == "legacy-pin"));
+    fn migration_removes_legacy_defaults_and_preserves_user_mappings() {
+        let mut cfg = config_with_gestures();
+        let gestures = &mut cfg.profiles[0].gestures;
+        gestures[0].enabled = false;
+        gestures[1].action = Action::Hotkey { keys: vec!["ctrl".into(), "q".into()] };
+        let mut pin = gestures[0].clone();
+        pin.id = LEGACY_BUILTIN_PIN_ID.into();
+        pin.action = Action::Screenshot;
+        gestures.push(pin.clone());
+        pin.id = "my-pin".into();
+        gestures.push(pin);
+        let old_toml = toml::to_string(&cfg).unwrap().replace("kind = \"screenshot\"", "kind = \"pin_screenshot\"");
+        let mut cfg: Config = toml::from_str(&old_toml).unwrap();
+        cfg.migrate_legacy_builtins();
+        cfg.migrate_legacy_builtins();
+        let gestures = &cfg.profiles[0].gestures;
+        assert_eq!(gestures.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(), ["seed-o-close", "my-pin"]);
+        assert!(matches!(gestures[1].action, Action::Screenshot));
     }
 
     #[test]
-    fn builtin_pin_matches_a_rectangle_and_disabled_state_removes_the_match() {
-        let mut cfg = Config::default();
-        let stroke = recognizer::normalize(&[[0.0,0.0],[0.0,120.0],[300.0,120.0],[300.0,0.0],[0.0,0.0]]).unwrap();
-        let input = crate::matcher::Input { button:Some(TriggerButton::Right),region:None,
-            wheel:&[],left_click:false,stroke:Some(&stroke) };
-        assert_eq!(crate::matcher::best(&cfg,"explorer.exe",input.clone()).unwrap().gesture.id,BUILTIN_PIN_ID);
-        cfg.profiles[0].gestures.last_mut().unwrap().enabled=false;
-        assert!(crate::matcher::best(&cfg,"explorer.exe",input).is_none());
+    fn old_config_gets_plugin_defaults_and_partial_settings_roundtrip() {
+        let old: Config = toml::from_str("version = 1").unwrap();
+        assert_eq!(old.plugins, PluginSettings::default());
+        let cfg: Config = toml::from_str(r#"
+            [plugins]
+            screenshot = true
+            [plugins.ai]
+            model = "custom"
+        "#).unwrap();
+        assert!(cfg.plugins.screenshot);
+        assert!(!cfg.plugins.recorder && !cfg.plugins.quickformater);
+        assert_eq!(cfg.plugins.ai.model, "custom");
+        let back: Config = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(cfg.plugins, back.plugins);
     }
 }

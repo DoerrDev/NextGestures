@@ -4,23 +4,37 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use gesture_core::Action;
 use gesture_platform::{clipboard, input, shell, window};
+use tauri::{AppHandle, Manager};
+
+use crate::state::AppState;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// 动作可能阻塞（起进程 / 跑 lua），单独开线程执行
-pub fn spawn(action: Action) {
+pub fn spawn(app: AppHandle, action: Action) {
     std::thread::spawn(move || {
-        if let Err(e) = run(&action) {
+        if let Err(e) = run(&app, &action) {
             log::error!("执行动作失败: {e:#}");
+            // The AI worker handles errors after it starts. This covers launch errors.
+            if action.is_ai() {
+                crate::engine::toast(&app, &e.to_string());
+            }
         }
     });
 }
 
-pub fn run(action: &Action) -> Result<()> {
+pub fn run(app: &AppHandle, action: &Action) -> Result<()> {
     match action {
         Action::None => Ok(()),
-        Action::PinScreenshot => anyhow::bail!("请通过手势圈出需要置顶的区域"),
+        Action::Screenshot
+        | Action::RecordRegion
+        | Action::AiJyutping
+        | Action::AiTranslate
+        | Action::AiPolish => {
+            let plugins = app.state::<AppState>().config.read().unwrap().plugins.clone();
+            crate::plugins::execute(app, action, &plugins)
+        }
         Action::Command { program, args, shell } => run_command(program, args, *shell),
         Action::Hotkey { keys } => input::send_hotkey(keys),
         Action::KeySequence { steps } => {

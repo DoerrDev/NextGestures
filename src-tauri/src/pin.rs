@@ -1,4 +1,3 @@
-use gesture_platform::pin::Bounds;
 use tauri::{AppHandle, Manager, WebviewWindow};
 
 /// 截图成功、失败或提前返回都会恢复之前可见的轨迹窗口。
@@ -13,7 +12,7 @@ impl Drop for RestoreOverlay {
     }
 }
 
-pub fn spawn(app: AppHandle, bounds: Bounds) {
+pub fn spawn(app: AppHandle) {
     let owner = app.clone();
     // 在主线程完成隐藏后再截图，避开部分机器上捕获排除 API 导致的启动错误。
     if let Err(e) = app.run_on_main_thread(move || {
@@ -32,7 +31,7 @@ pub fn spawn(app: AppHandle, bounds: Bounds) {
         std::thread::spawn(move || {
             // 等待隐藏提交到桌面合成器；随后恢复轨迹层，贴图继续独立运行。
             std::thread::sleep(std::time::Duration::from_millis(80));
-            if let Err(e) = gesture_platform::pin::open_after_capture(bounds, move || drop(restore))
+            if let Err(e) = gesture_platform::pin::select_and_open_after_capture(move || drop(restore))
             {
                 log::error!("创建贴图失败: {e:#}");
                 crate::engine::toast(&owner, &format!("贴图失败：{e}"));

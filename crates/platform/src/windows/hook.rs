@@ -305,6 +305,10 @@ fn handle_with_blacklist(
         return true;
     }
 
+    if super::region::is_selecting() {
+        return false;
+    }
+
     if PICKING.load(Relaxed) {
         match msg {
             WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => return true,

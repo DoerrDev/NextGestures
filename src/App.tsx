@@ -25,9 +25,9 @@ import {
   api,
   cloneGesture,
   emptyGesture,
-  isBuiltinGesture,
   type Config,
   type Gesture,
+  type Plugins,
   type Profile,
   type Settings,
 } from './api'
@@ -166,7 +166,7 @@ export function App() {
     if (filter === 'off' && g.enabled) return false
     if (!needle) return true
     return `${g.name} ${describeAction(g.action)}`.toLowerCase().includes(needle)
-  }).sort((a, b) => Number(isBuiltinGesture(b)) - Number(isBuiltinGesture(a)))
+  })
 
   const guard = async (fn: () => Promise<void>) => {
     try {
@@ -191,8 +191,9 @@ export function App() {
       setActiveId(profile.id)
     })
 
-  const saveSettings = (settings: Settings) =>
+  const saveSettings = (settings: Settings, plugins: Plugins, pluginsChanged: boolean) =>
     void guard(async () => {
+      if (pluginsChanged) await api.setPlugins(plugins)
       await api.saveSettings(settings)
       setSettingsOpen(false)
       flash(t('saved'))
@@ -463,7 +464,7 @@ export function App() {
                         color={g.enabled ? config.settings.trail_color : '#a1a1a1'}
                         width={2.5}
                       />
-                      <div className="rname">{g.name}{isBuiltinGesture(g) && <span className="tag blue builtin-tag">内置</span>}</div>
+                      <div className="rname">{g.name}</div>
                       <div className="rtags">
                         {triggerChip(g) && (
                           <span className={g.enabled ? 'tag blue' : 'tag mute'}>{triggerChip(g)}</span>
@@ -491,7 +492,7 @@ export function App() {
                         >
                           {g.enabled ? <PowerOff size={14} strokeWidth={2} /> : <Power size={14} strokeWidth={2} />}
                         </button>
-                        {!isBuiltinGesture(g) && <><button
+                        <button
                           type="button"
                           className="btn-ghost"
                           title={t('duplicate')}
@@ -515,7 +516,6 @@ export function App() {
                         >
                           <Trash2 size={14} strokeWidth={2} />
                         </button>
-                        </>}
                       </div>
                     </div>
                   ))}
@@ -558,9 +558,8 @@ export function App() {
               {editing ? (
                 <GesturePane
                   key={`${editing.isNew ? 'new' : 'edit'}:${editing.gesture.id}`}
-                  initial={isBuiltinGesture(editing.gesture)
-                    ? active.gestures.find(g => g.id === editing.gesture.id) ?? editing.gesture
-                    : editing.gesture}
+                  initial={editing.gesture}
+                  plugins={config.plugins}
                   isNew={editing.isNew}
                   onSave={saveGesture}
                   onClose={() => setEditing(null)}
@@ -625,14 +624,14 @@ export function App() {
                           {t('conflict')}
                         </span>
                       )}
-                      {!isBuiltinGesture(g) && <button
+                      <button
                         type="button"
                         className="card-more"
                         title={t('more')}
                         onClick={() => setMenuId(menuId === g.id ? '' : g.id)}
                       >
                         <MoreHorizontal size={15} strokeWidth={2} />
-                      </button>}
+                      </button>
                       {menuId === g.id && (
                         <>
                           <div className="card-menu-mask" onClick={() => setMenuId('')} />
@@ -665,7 +664,7 @@ export function App() {
                       )}
                     </div>
 
-                    <div className="card-title">{g.name}{isBuiltinGesture(g) && <span className="tag blue builtin-tag">内置</span>}</div>
+                    <div className="card-title">{g.name}</div>
 
                     <div className="meta">
                       {triggerChip(g) && (
@@ -684,14 +683,14 @@ export function App() {
                     </div>
 
                     <div className="card-acts">
-                      {!isBuiltinGesture(g) && <button
+                      <button
                         type="button"
                         className="btn-ghost"
                         onClick={() => editGesture(g)}
                       >
                         <Pencil size={14} strokeWidth={2} />
                         {t('edit')}
-                      </button>}
+                      </button>
                       <button
                         type="button"
                         className="btn-ghost"
@@ -722,6 +721,7 @@ export function App() {
       {settingsOpen && (
         <SettingsDialog
           initial={config.settings}
+          initialPlugins={config.plugins}
           unread={unread}
           configPath={configPath}
           onSave={saveSettings}
