@@ -3,7 +3,7 @@
 
   # NextGestures
 
-  一款轻量、可编程的 Windows 鼠标手势工具
+  一款轻量、可自由定制的 Windows 鼠标手势工具
 
 </div>
 
