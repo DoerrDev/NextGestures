@@ -6,7 +6,7 @@ use windows::Win32::UI::Input::Ime::{
     CFS_POINT, COMPOSITIONFORM, ImmGetContext, ImmReleaseContext, ImmSetCompositionWindow,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SetActiveWindow, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_LEFT, VK_RIGHT, VK_UP,
+    SetActiveWindow, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_LEFT, VK_RIGHT, VK_SHIFT, VK_UP,
 };
 
 pub(super) const CARET_TIMER: usize = 7;
@@ -419,6 +419,8 @@ pub(super) fn shortcut(msg: &MSG) -> Option<u16> {
         Some(bar::ERASER)
     } else if key == usize::from(VK_ESCAPE.0) {
         Some(ESCAPE)
+    } else if key == usize::from(VK_SPACE.0) {
+        Some(TOGGLE_FOLD)
     } else {
         None
     }
@@ -440,8 +442,9 @@ pub(super) fn pump(hwnd: HWND, msg: &MSG) -> bool {
             let ctrl = key_down(VK_CONTROL);
             let result = match VIRTUAL_KEY(key) {
                 VK_ESCAPE => finish_text(hwnd),
-                VK_RETURN if ctrl => finish_text(hwnd),
-                VK_RETURN => edit_text(hwnd, |e| insert(e, &['\n'])),
+                // 与工具栏提示一致：Enter 确定，Shift+Enter 换行。
+                VK_RETURN if key_down(VK_SHIFT) => edit_text(hwnd, |e| insert(e, &['\n'])),
+                VK_RETURN => finish_text(hwnd),
                 VK_BACK => edit_text(hwnd, |e| {
                     if e.caret > 0 {
                         e.caret -= 1;
@@ -790,7 +793,7 @@ fn select_tool(hwnd: HWND, id: u16) -> Result<()> {
     settle(hwnd)?;
     with_picture(|p| p.ink.last = None);
     if with_picture(|p| p.folded) {
-        toggle_fold(hwnd, POINT::default())?;
+        toggle_fold(hwnd)?;
     }
     with_picture(|p| {
         let current = p.ink.tool;

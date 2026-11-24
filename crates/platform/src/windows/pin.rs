@@ -1,6 +1,6 @@
 //! 物理像素截图与逐像素阴影；每张贴图独立拥有图片及消息循环。
 use anyhow::{Result, ensure};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use windows::Win32::Foundation::{
@@ -12,7 +12,7 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetCapture, GetKeyState, ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE,
-    VK_MENU, VK_RETURN,
+    VK_MENU, VK_RETURN, VK_SPACE,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::w;
@@ -27,6 +27,7 @@ use ink::with_picture;
 
 pub(super) const SHADOW: i32 = 20;
 const FOLD_SIZE: i32 = 64;
+const TOGGLE_FOLD: u16 = 151;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Bounds {
@@ -229,7 +230,10 @@ fn edge_pixel(x: i32, y: i32, width: i32, height: i32, strength: f32) -> [u8; 4]
     ]
 }
 
-thread_local! { static PICTURE: RefCell<Option<Picture>> = const { RefCell::new(None) }; }
+thread_local! {
+    static PICTURE: RefCell<Option<Picture>> = const { RefCell::new(None) };
+    static DRAG_OFFSET: Cell<Option<POINT>> = const { Cell::new(None) };
+}
 static COUNT: AtomicUsize = AtomicUsize::new(0);
 struct Slot;
 impl Drop for Slot {
@@ -338,7 +342,8 @@ fn render(hwnd: HWND, position: Option<POINT>) -> Result<()> {
     Ok(())
 }
 
-fn toggle_fold(hwnd: HWND, click: POINT) -> Result<()> {
+fn toggle_fold(hwnd: HWND) -> Result<()> {
+    stop_drag(hwnd);
     let mut rect = RECT::default();
     unsafe {
         GetWindowRect(hwnd, &mut rect)?;
@@ -357,8 +362,8 @@ fn toggle_fold(hwnd: HWND, click: POINT) -> Result<()> {
             let width = p.width.min(FOLD_SIZE);
             let height = p.height.min(FOLD_SIZE);
             View {
-                x: (click.x - rect.left - SHADOW - width / 2).clamp(0, p.width - width),
-                y: (click.y - rect.top - SHADOW - height / 2).clamp(0, p.height - height),
+                x: (p.width - width) / 2,
+                y: (p.height - height) / 2,
                 width,
                 height,
             }
@@ -391,11 +396,54 @@ fn hit_test(hwnd: HWND, point: POINT) -> LRESULT {
     if (rect.left + SHADOW..rect.left + SHADOW + width).contains(&point.x)
         && (rect.top + SHADOW..rect.top + SHADOW + height).contains(&point.y)
     {
-        // 涂鸦模式下内容区作为客户区接收鼠标，否则整张图可拖动。
+        // 涂鸦模式走客户区；普通模式用标题区消息区分拖动和双击。
         LRESULT(if drawing { HTCLIENT } else { HTCAPTION } as isize)
     } else {
         LRESULT(HTTRANSPARENT as isize)
     }
+}
+
+fn start_drag(hwnd: HWND, cursor: POINT) -> Result<()> {
+    let mut rect = RECT::default();
+    unsafe {
+        GetWindowRect(hwnd, &mut rect)?;
+        SetCapture(hwnd);
+        if GetCapture() == hwnd {
+            DRAG_OFFSET.set(Some(POINT {
+                x: cursor.x - rect.left,
+                y: cursor.y - rect.top,
+            }));
+        }
+    }
+    Ok(())
+}
+
+fn move_drag(hwnd: HWND, offset: POINT) -> Result<()> {
+    let mut cursor = POINT::default();
+    unsafe {
+        GetCursorPos(&mut cursor)?;
+        // 直接使用桌面坐标，避免系统移动循环在松手时把窗口拉回工作区。
+        SetWindowPos(
+            hwnd,
+            None,
+            cursor.x - offset.x,
+            cursor.y - offset.y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )?;
+    }
+    Ok(())
+}
+
+fn stop_drag(hwnd: HWND) -> bool {
+    let dragging = DRAG_OFFSET.take().is_some();
+    unsafe {
+        if dragging && GetCapture() == hwnd {
+            let _ = ReleaseCapture();
+        }
+    }
+    dragging
 }
 
 pub fn open(bounds: Bounds) -> Result<()> {
@@ -456,7 +504,7 @@ pub fn open_after_capture(bounds: Bounds, captured: impl FnOnce()) -> Result<()>
             let hwnd = CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
                 w!("NextGesturesQuickPin"),
-                w!("贴图 · 拖动移动 / 滚轮透明度 / 双击折叠 / 右键关闭"),
+                w!("贴图 · 拖动移动 / 滚轮透明度 / 空格折叠或恢复 / 双击关闭"),
                 WS_POPUP,
                 bounds.x - SHADOW,
                 bounds.y - SHADOW,
@@ -508,7 +556,10 @@ pub fn open_after_capture(bounds: Bounds, captured: impl FnOnce()) -> Result<()>
                 }
                 // 贴图或其工具栏获得焦点时的快捷键（类似 Snipaste）。
                 if let Some(id) = ink::shortcut(&msg) {
-                    command(hwnd, id);
+                    // WM_KEYDOWN 的第 30 位表示按键此前已按下，长按空格时只切换一次。
+                    if id != TOGGLE_FOLD || msg.lParam.0 & (1 << 30) == 0 {
+                        command(hwnd, id);
+                    }
                     continue;
                 }
                 if super::pin_toolbar::translate(&msg) {
@@ -632,6 +683,10 @@ fn command(hwnd: HWND, id: u16) {
             bar::CLOSE => unsafe {
                 DestroyWindow(hwnd)?;
             },
+            TOGGLE_FOLD => {
+                ink::settle(hwnd)?;
+                toggle_fold(hwnd)?;
+            }
             _ => {
                 ink::command(hwnd, id)?;
             }
@@ -660,7 +715,12 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
                 LRESULT(0)
             }
             WM_MOUSEMOVE => {
-                report_render_error(ink::pointer_move(hwnd, point(lp), wp.0 & 0x0004 != 0));
+                let result = if let Some(offset) = DRAG_OFFSET.get() {
+                    move_drag(hwnd, offset)
+                } else {
+                    ink::pointer_move(hwnd, point(lp), wp.0 & 0x0004 != 0)
+                };
+                report_render_error(result);
                 LRESULT(0)
             }
             WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
@@ -668,8 +728,18 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
-                report_render_error(ink::pointer_up(hwnd));
+                if !stop_drag(hwnd) {
+                    report_render_error(ink::pointer_up(hwnd));
+                }
                 LRESULT(0)
+            }
+            WM_CAPTURECHANGED => {
+                DRAG_OFFSET.set(None);
+                DefWindowProcW(hwnd, message, wp, lp)
+            }
+            WM_CANCELMODE => {
+                stop_drag(hwnd);
+                DefWindowProcW(hwnd, message, wp, lp)
             }
             WM_SETCURSOR
                 if (lp.0 & 0xffff) as u32 == HTCLIENT && with_picture(|p| p.ink.tool.is_some()) =>
@@ -703,9 +773,12 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
                 DefWindowProcW(hwnd, message, wp, lp)
             }
             WM_NCHITTEST => hit_test(hwnd, point(lp)),
-            // HTCAPTION 左键交给 DefWindowProc 的系统移动循环。
+            WM_NCLBUTTONDOWN if wp.0 == HTCAPTION as usize => {
+                report_render_error(start_drag(hwnd, point(lp)));
+                LRESULT(0)
+            }
             WM_NCLBUTTONDBLCLK => {
-                report_render_error(toggle_fold(hwnd, point(lp)));
+                command(hwnd, bar::CLOSE);
                 LRESULT(0)
             }
             WM_NCRBUTTONDOWN | WM_RBUTTONDOWN => LRESULT(0),
@@ -753,6 +826,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
                 LRESULT(0)
             }
             WM_DESTROY => {
+                stop_drag(hwnd);
                 let _ = RemovePropW(hwnd, w!("NextGesturesQuickPin"));
                 PostQuitMessage(0);
                 LRESULT(0)
@@ -831,8 +905,25 @@ mod tests {
     }
     #[test]
     #[ignore = "opens a real desktop pin window; run alone"]
-    fn desktop_pin_toolbar_fold_opacity_save_cancel_and_close() {
+    fn desktop_pin_toolbar_space_fold_opacity_save_cancel_and_double_click_close() {
         use std::time::{Duration, Instant};
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            INPUT, INPUT_0, INPUT_MOUSE, MOUSE_EVENT_FLAGS, MOUSEEVENTF_LEFTDOWN,
+            MOUSEEVENTF_LEFTUP, MOUSEINPUT, SendInput,
+        };
+
+        fn left_button(flags: MOUSE_EVENT_FLAGS) {
+            let input = INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 {
+                    mi: MOUSEINPUT {
+                        dwFlags: flags,
+                        ..Default::default()
+                    },
+                },
+            };
+            assert_eq!(unsafe { SendInput(&[input], size_of::<INPUT>() as i32) }, 1);
+        }
         unsafe extern "system" fn backdrop_proc(
             hwnd: HWND,
             msg: u32,
@@ -997,14 +1088,29 @@ mod tests {
             let own = is_at((150, 150));
             let mut original = RECT::default();
             GetWindowRect(hwnd, &mut original).unwrap();
-            SendMessageW(
-                hwnd,
-                WM_NCLBUTTONDBLCLK,
-                Some(WPARAM(HTCAPTION as usize)),
-                Some(packed(200, 160)),
-            );
-            let mut folded = RECT::default();
-            GetWindowRect(hwnd, &mut folded).unwrap();
+            let press_space = |previously_down| {
+                PostMessageW(
+                    Some(hwnd),
+                    WM_KEYDOWN,
+                    WPARAM(usize::from(VK_SPACE.0)),
+                    LPARAM(1 | if previously_down { 1 << 30 } else { 0 }),
+                )
+                .unwrap();
+            };
+            let await_width = |width| {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    let mut rect = RECT::default();
+                    GetWindowRect(hwnd, &mut rect).unwrap();
+                    if rect.right - rect.left == width || Instant::now() >= deadline {
+                        return rect;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            };
+            press_space(false);
+            press_space(true);
+            let folded = await_width(104);
             SetWindowPos(
                 hwnd,
                 None,
@@ -1015,14 +1121,8 @@ mod tests {
                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
             )
             .unwrap();
-            SendMessageW(
-                hwnd,
-                WM_NCLBUTTONDBLCLK,
-                Some(WPARAM(HTCAPTION as usize)),
-                Some(packed(folded.left + 60, folded.top + 70)),
-            );
-            let mut restored = RECT::default();
-            GetWindowRect(hwnd, &mut restored).unwrap();
+            press_space(false);
+            let restored = await_width(280);
             SendMessageW(
                 hwnd,
                 WM_MOUSEWHEEL,
@@ -1051,17 +1151,66 @@ mod tests {
                 }
                 std::thread::sleep(Duration::from_millis(25));
             }
+            let mut drag_positions = None;
             if cancelled {
                 let deadline = Instant::now() + Duration::from_secs(3);
                 while !IsWindowVisible(toolbar).as_bool() && Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                SendMessageW(
-                    GetDlgItem(Some(toolbar), i32::from(super::super::pin_toolbar::CLOSE)).unwrap(),
-                    BM_CLICK,
-                    None,
-                    None,
+                let mut monitor = MONITORINFO {
+                    cbSize: size_of::<MONITORINFO>() as u32,
+                    ..Default::default()
+                };
+                assert!(
+                    GetMonitorInfoW(
+                        MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST),
+                        &mut monitor
+                    )
+                    .as_bool()
                 );
+                let mut previous_cursor = POINT::default();
+                GetCursorPos(&mut previous_cursor).unwrap();
+                let x = restored.left + 90;
+                let y = monitor.rcMonitor.top + 3;
+                SetCursorPos(x, restored.top + 100).unwrap();
+                left_button(MOUSEEVENTF_LEFTDOWN);
+                let thread = GetWindowThreadProcessId(hwnd, None);
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    let mut info = GUITHREADINFO {
+                        cbSize: size_of::<GUITHREADINFO>() as u32,
+                        ..Default::default()
+                    };
+                    if GetGUIThreadInfo(thread, &mut info).is_ok() && info.hwndCapture == hwnd
+                        || Instant::now() >= deadline
+                    {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                SetCursorPos(x, y).unwrap();
+                let expected_top = y - 100;
+                let mut during_drag = RECT::default();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    GetWindowRect(hwnd, &mut during_drag).unwrap();
+                    if during_drag.top == expected_top || Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                left_button(MOUSEEVENTF_LEFTUP);
+                std::thread::sleep(Duration::from_millis(150));
+                let mut after_release = RECT::default();
+                GetWindowRect(hwnd, &mut after_release).unwrap();
+                drag_positions = Some((during_drag.top, after_release.top, expected_top));
+                SetCursorPos(x, y + 30).unwrap();
+                for _ in 0..2 {
+                    left_button(MOUSEEVENTF_LEFTDOWN);
+                    left_button(MOUSEEVENTF_LEFTUP);
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                SetCursorPos(previous_cursor.x, previous_cursor.y).unwrap();
             } else {
                 SendMessageW(hwnd, WM_CLOSE, None, None);
             }
@@ -1069,8 +1218,8 @@ mod tests {
             while IsWindow(Some(hwnd)).as_bool() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(20));
             }
-            let toolbar_closed = !IsWindow(Some(hwnd)).as_bool();
-            if !toolbar_closed {
+            let double_click_closed = !IsWindow(Some(hwnd)).as_bool();
+            if !double_click_closed {
                 SendMessageW(hwnd, WM_CLOSE, None, None);
             }
             (
@@ -1090,8 +1239,9 @@ mod tests {
                 opaque_again,
                 cancelled,
                 toolbar,
-                toolbar_closed,
+                double_click_closed,
                 toolbar_native,
+                drag_positions,
             )
         };
         worker.join().unwrap().unwrap();
@@ -1154,13 +1304,19 @@ mod tests {
         assert!((evidence.13 & 255) <= 2);
         assert!(evidence.14, "save dialog did not cancel cleanly");
         assert!(!unsafe { IsWindow(Some(evidence.15)) }.as_bool());
-        assert!(evidence.16, "toolbar close command did not close the pin");
+        assert!(evidence.16, "double-click did not close the pin");
         assert!(
             evidence.17,
             "toolbar controls did not bypass the gesture hook"
         );
+        let (during_drag, after_release, expected_top) = evidence.18.unwrap();
+        assert_eq!(
+            during_drag, expected_top,
+            "pin did not follow the cursor above the monitor"
+        );
+        assert_eq!(after_release, expected_top, "pin jumped down on release");
         println!(
-            "Desktop pin: toolbar visible, opacity buttons update pixels, original fold/restore, save cancellation, toolbar close released resources"
+            "Desktop pin: toolbar and opacity work, Space folds/restores, save cancels, drag stays above the monitor after release, double-click closes"
         );
     }
 }

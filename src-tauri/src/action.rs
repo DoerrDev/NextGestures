@@ -16,11 +16,11 @@ pub fn spawn(app: AppHandle, action: Action) {
     std::thread::spawn(move || {
         if let Err(e) = run(&app, &action) {
             log::error!("执行动作失败: {e:#}");
-            // The AI worker handles errors after it starts. This covers launch errors.
+            // The AI worker handles errors after it starts. This covers launch and URL errors.
             if action.is_ai() {
                 crate::engine::toast(&app, &e.to_string());
             }
-            if matches!(action, Action::LaunchApp { .. }) {
+            if matches!(action, Action::LaunchApp { .. } | Action::OpenUrl { .. }) {
                 crate::engine::toast(&app, &e.to_string());
             }
         }
