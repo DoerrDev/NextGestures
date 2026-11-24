@@ -578,7 +578,12 @@ unsafe fn choose_settings(
 fn save_dialog(owner: HWND) -> Result<Option<PathBuf>> {
     unsafe {
         let mut file = vec![0u16; 32_768];
-        for (slot, unit) in file.iter_mut().zip("NextGestures".encode_utf16()) {
+        let now = windows::Win32::System::SystemInformation::GetLocalTime();
+        let filename = format!(
+            "{:04}-{:02}-{:02} {:02}-{:02}-{:02}",
+            now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond
+        );
+        for (slot, unit) in file.iter_mut().zip(filename.encode_utf16()) {
             *slot = unit;
         }
         let mut dialog = OPENFILENAMEW {
