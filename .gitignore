@@ -9,3 +9,5 @@ build.ps1
 .playwright-cli/
 *.i64
 *.idb
+
+/NG-Doc/
