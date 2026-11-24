@@ -2,12 +2,14 @@ import { Play } from 'lucide-react'
 import { api, type Action, type Plugins } from '../api'
 import { t, type Key } from '../i18n'
 import { HotkeyRecorder } from './HotkeyRecorder'
+import { KeySequenceRecorder } from './KeySequenceRecorder'
 
 interface Props {
   action: Action
   plugins: Plugins
   onChange: (action: Action) => void
   onError: (msg: string) => void
+  onRecordingChange: (recording: boolean) => void
 }
 
 const PLUGIN_FOR_ACTION: Partial<Record<Action['kind'], 'screenshot' | 'recorder' | 'quickformater'>> = {
@@ -46,7 +48,7 @@ function blank(kind: Action['kind']): Action {
     case 'hotkey':
       return { kind, keys: [] }
     case 'key_sequence':
-      return { kind, steps: [] }
+      return { kind }
     case 'open_url':
       return { kind, url: 'https://www.google.com/search?q={selection}' }
     default:
@@ -54,13 +56,7 @@ function blank(kind: Action['kind']): Action {
   }
 }
 
-const parseKeys = (text: string) =>
-  text
-    .split('+')
-    .map((s) => s.trim())
-    .filter(Boolean)
-
-export function ActionEditor({ action, plugins, onChange, onError }: Props) {
+export function ActionEditor({ action, plugins, onChange, onError, onRecordingChange }: Props) {
   const currentPlugin = PLUGIN_FOR_ACTION[action.kind]
   const isDisabled = currentPlugin !== undefined && !plugins[currentPlugin]
 
@@ -146,23 +142,12 @@ export function ActionEditor({ action, plugins, onChange, onError }: Props) {
       )}
 
       {action.kind === 'key_sequence' && (
-        <div className="field">
-          <label htmlFor="action-steps">{t('steps')}</label>
-          <textarea
-            id="action-steps"
-            value={action.steps.map((s) => s.join('+')).join('\n')}
-            placeholder={'ctrl+c\nalt+tab\nctrl+v'}
-            onChange={(e) =>
-              onChange({
-                ...action,
-                steps: e.target.value
-                  .split('\n')
-                  .map(parseKeys)
-                  .filter((s) => s.length > 0),
-              })
-            }
-          />
-        </div>
+        <KeySequenceRecorder
+          action={action}
+          onChange={onChange}
+          onError={onError}
+          onRecordingChange={onRecordingChange}
+        />
       )}
 
       {action.kind === 'open_url' && (
@@ -181,7 +166,7 @@ export function ActionEditor({ action, plugins, onChange, onError }: Props) {
         </div>
       )}
 
-      {action.kind !== 'none' && currentPlugin === undefined && (
+      {action.kind !== 'none' && action.kind !== 'key_sequence' && currentPlugin === undefined && (
         <button type="button" className="btn-outline subtle" onClick={test}>
           <Play size={16} strokeWidth={2} />
           {t('test')}
@@ -198,7 +183,9 @@ export function describeAction(action: Action): string {
     case 'hotkey':
       return action.keys.join('+')
     case 'key_sequence':
-      return action.steps.map((s) => s.join('+')).join(' → ')
+      return action.events?.length
+        ? action.events.filter((e) => e.down).map((e) => e.label).join(' → ')
+        : action.steps?.map((step) => step.join('+')).join(' → ') || t('actionKeySequence')
     case 'open_url':
       return action.url
     default:

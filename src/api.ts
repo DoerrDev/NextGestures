@@ -14,6 +14,15 @@ export type WheelDir = 'Up' | 'Down'
 export type FireMode = 'OnRelease' | 'Immediate'
 export type Point = [number, number]
 
+export interface KeySequenceEvent {
+  vk: number
+  scan: number
+  extended: boolean
+  down: boolean
+  delay_ms: number
+  label: string
+}
+
 export type Action =
   | { kind: 'none' }
   | { kind: 'screenshot' }
@@ -23,7 +32,7 @@ export type Action =
   | { kind: 'ai_polish' }
   | { kind: 'command'; program: string; args: string[]; shell: boolean }
   | { kind: 'hotkey'; keys: string[] }
-  | { kind: 'key_sequence'; steps: string[][] }
+  | { kind: 'key_sequence'; steps?: string[][]; events?: KeySequenceEvent[] }
   | { kind: 'open_url'; url: string }
 
 export interface Gesture {
@@ -137,6 +146,9 @@ export const api = {
   /** 结果通过 `hotkey:mods` / `hotkey:recorded` 事件回报 */
   beginKeyRecording: () => invoke<void>('begin_key_recording'),
   cancelKeyRecording: () => invoke<void>('cancel_key_recording'),
+  beginKeySequence: (id: string) => invoke<void>('begin_key_sequence', { id }),
+  stopKeySequence: (id: string) => invoke<KeySequenceEvent[]>('stop_key_sequence', { id }),
+  cancelKeySequence: (id: string) => invoke<void>('cancel_key_sequence', { id }),
   setEnabled: (enabled: boolean) => invoke<void>('set_enabled', { enabled }),
   isEnabled: () => invoke<boolean>('is_enabled'),
   foregroundExe: () => invoke<string>('foreground_exe'),

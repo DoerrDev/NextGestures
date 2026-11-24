@@ -23,6 +23,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use super::hook::MAGIC;
 use super::input::key_name;
 
+pub mod sequence;
+
 const WM_MODS: u32 = WM_APP + 1;
 const WM_DONE: u32 = WM_APP + 2;
 /// 录完后继续吞键直到全部松开；这么久没有任何按键事件就认为抬起事件丢了，直接收工

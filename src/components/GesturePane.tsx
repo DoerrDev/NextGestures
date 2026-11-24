@@ -47,6 +47,7 @@ const TRIGGER_LABEL: Record<string, string> = {
 export function GesturePane({ initial, plugins, isNew, onSave, onClose, onToggle, onDelete, onDuplicate }: Props) {
   const [draft, setDraft] = useState<Gesture>(initial)
   const [recording, setRecording] = useState(false)
+  const [sequenceRecording, setSequenceRecording] = useState(false)
   const [live, setLive] = useState<LivePayload | null>(null)
   const [error, setError] = useState('')
   const liveRef = useRef<LivePayload | null>(null)
@@ -163,7 +164,7 @@ export function GesturePane({ initial, plugins, isNew, onSave, onClose, onToggle
             />
           )}
           <p className="hint">{recording ? t('recording') : t('recordHint')}</p>
-          <button type="button" className="btn-outline" onClick={startRecord} disabled={recording}>
+          <button type="button" className="btn-outline" onClick={startRecord} disabled={recording || sequenceRecording}>
             {recorded ? (
               <RotateCcw size={16} strokeWidth={2} />
             ) : (
@@ -234,8 +235,9 @@ export function GesturePane({ initial, plugins, isNew, onSave, onClose, onToggle
         <ActionEditor
           action={draft.action}
           plugins={plugins}
-          onChange={(action) => setDraft({ ...draft, action })}
+          onChange={(action) => setDraft((current) => ({ ...current, action }))}
           onError={setError}
+          onRecordingChange={setSequenceRecording}
         />
 
         {error && <p className="error pane-error">{error}</p>}
@@ -266,6 +268,7 @@ export function GesturePane({ initial, plugins, isNew, onSave, onClose, onToggle
             <button
               type="button"
               className="btn-ghost"
+              disabled={sequenceRecording}
               title={t('duplicate')}
               onClick={() => onDuplicate({ ...draft, name: draft.name.trim() })}
             >
@@ -275,7 +278,7 @@ export function GesturePane({ initial, plugins, isNew, onSave, onClose, onToggle
           </>
         )}
         <span className="grow" />
-        <button type="button" className="btn-primary btn-sm" onClick={submit}>
+        <button type="button" className="btn-primary btn-sm" onClick={submit} disabled={sequenceRecording}>
           <Check size={15} strokeWidth={2} />
           {t('save')}
         </button>

@@ -37,10 +37,15 @@ pub fn run(app: &AppHandle, action: &Action) -> Result<()> {
         }
         Action::Command { program, args, shell } => run_command(program, args, *shell),
         Action::Hotkey { keys } => input::send_hotkey(keys),
-        Action::KeySequence { steps } => {
-            for step in steps {
+        Action::KeySequence { steps, events } => {
+            if !events.is_empty() {
+                return input::replay_sequence(events);
+            }
+            for (index, step) in steps.iter().enumerate() {
+                if index > 0 {
+                    std::thread::sleep(Duration::from_millis(30));
+                }
                 input::send_hotkey(step)?;
-                std::thread::sleep(Duration::from_millis(30));
             }
             Ok(())
         }

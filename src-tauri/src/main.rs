@@ -69,6 +69,9 @@ fn main() {
             commands::cancel_pick,
             commands::begin_key_recording,
             commands::cancel_key_recording,
+            commands::begin_key_sequence,
+            commands::stop_key_sequence,
+            commands::cancel_key_sequence,
             commands::set_enabled,
             commands::is_enabled,
             commands::foreground_exe,
@@ -95,6 +98,11 @@ fn main() {
             Ok(())
         })
         .on_window_event(|win, event| {
+            if win.label() == "main"
+                && matches!(event, tauri::WindowEvent::Focused(false) | tauri::WindowEvent::CloseRequested { .. })
+            {
+                gesture_platform::keyrec::sequence::cancel(None);
+            }
             // 主窗口关闭只是隐藏，程序常驻托盘
             if let tauri::WindowEvent::CloseRequested { api, .. } = event
                 && win.label() == "main"

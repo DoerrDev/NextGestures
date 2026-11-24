@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering::Relaxed;
 
-use gesture_core::{Action, Config, Gesture, PluginSettings, Profile, Settings};
+use gesture_core::{Action, Config, Gesture, KeySequenceEvent, PluginSettings, Profile, Settings};
 use gesture_platform::keyrec::{self, KeyRecEvent};
 use gesture_platform::{hook, window};
 use serde::{Deserialize, Serialize};
@@ -179,6 +179,35 @@ pub fn cancel_key_recording() {
     keyrec::cancel();
 }
 
+#[derive(Clone, Serialize)]
+struct KeySequencePreview {
+    id: String,
+    event: KeySequenceEvent,
+}
+
+#[tauri::command]
+pub fn begin_key_sequence(window: tauri::WebviewWindow, id: String) -> R<()> {
+    let owner = window.hwnd().map_err(err)?.0 as usize;
+    let preview_id = id.clone();
+    keyrec::sequence::begin(id, owner, move |event| {
+        let _ = window.emit("key-sequence:event", KeySequencePreview { id: preview_id.clone(), event });
+    })
+    .map_err(err)
+}
+
+#[tauri::command]
+pub async fn stop_key_sequence(id: String) -> R<Vec<KeySequenceEvent>> {
+    tauri::async_runtime::spawn_blocking(move || keyrec::sequence::stop(&id))
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
+#[tauri::command]
+pub fn cancel_key_sequence(id: String) {
+    keyrec::sequence::cancel(Some(&id));
+}
+
 #[tauri::command]
 pub fn set_enabled(app: AppHandle, enabled: bool) {
     crate::set_enabled(&app, enabled);
@@ -201,7 +230,10 @@ pub fn virtual_screen_size(app: AppHandle) -> VirtualScreenSize {
 }
 
 #[tauri::command]
-pub async fn test_action(app: AppHandle, action: Action) -> R<()> {
+pub async fn test_action(app: AppHandle, window: tauri::WebviewWindow, action: Action) -> R<()> {
+    if matches!(action, Action::KeySequence { .. }) && window.is_focused().map_err(err)? {
+        return Err("请在倒计时结束前切换到要测试的窗口".into());
+    }
     tauri::async_runtime::spawn_blocking(move || crate::action::run(&app, &action))
         .await
         .map_err(err)?
@@ -222,6 +254,7 @@ pub fn hide_gesture_hint_preview(app: AppHandle) {
 
 #[tauri::command]
 pub fn hide_settings(app: AppHandle) {
+    keyrec::sequence::cancel(None);
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.hide();
     }

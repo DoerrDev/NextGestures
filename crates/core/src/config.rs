@@ -62,6 +62,16 @@ pub enum FireMode {
     Immediate,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeySequenceEvent {
+    pub vk: u16,
+    pub scan: u16,
+    pub extended: bool,
+    pub down: bool,
+    pub delay_ms: u32,
+    pub label: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
@@ -85,8 +95,13 @@ pub enum Action {
     },
     /// 组合快捷键，同时按下再逆序释放，例如 ["ctrl", "w"]
     Hotkey { keys: Vec<String> },
-    /// 依次发送多组组合键
-    KeySequence { steps: Vec<Vec<String>> },
+    /// 录制的按键事件，或旧版保存的多组组合键。
+    KeySequence {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        steps: Vec<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        events: Vec<KeySequenceEvent>,
+    },
     /// 用默认浏览器打开链接，`{selection}` 会替换成当前选中的文字
     OpenUrl { url: String },
 }
@@ -648,5 +663,26 @@ mod tests {
         assert_eq!(cfg.plugins.ai.model, "custom");
         let back: Config = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(cfg.plugins, back.plugins);
+    }
+
+    #[test]
+    fn key_sequences_read_legacy_steps_and_round_trip_recorded_events() {
+        let legacy: Action = toml::from_str("kind = 'key_sequence'\nsteps = [['ctrl', 'c']]").unwrap();
+        assert_eq!(legacy, Action::KeySequence {
+            steps: vec![vec!["ctrl".into(), "c".into()]], events: vec![],
+        });
+
+        let recorded = Action::KeySequence {
+            steps: vec![],
+            events: vec![
+                KeySequenceEvent { vk: 65, scan: 30, extended: false, down: true, delay_ms: 0, label: "a".into() },
+                KeySequenceEvent { vk: 65, scan: 30, extended: false, down: false, delay_ms: 125, label: "a".into() },
+            ],
+        };
+        let mut config = config_with_gestures();
+        config.profiles[0].gestures[0].action = recorded.clone();
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        let restored: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(restored.profiles[0].gestures[0].action, recorded);
     }
 }

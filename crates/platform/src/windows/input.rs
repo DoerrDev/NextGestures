@@ -1,5 +1,5 @@
 use anyhow::{Result, bail};
-use gesture_core::TriggerButton;
+use gesture_core::{KeySequenceEvent, TriggerButton};
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
@@ -90,6 +90,53 @@ pub fn send_hotkey(keys: &[String]) -> Result<()> {
     let sent = unsafe { SendInput(&batch, size_of::<INPUT>() as i32) };
     if sent as usize != batch.len() {
         bail!("SendInput 只发送了 {sent}/{} 个事件", batch.len());
+    }
+    Ok(())
+}
+
+pub fn replay_sequence(events: &[KeySequenceEvent]) -> Result<()> {
+    use std::time::{Duration, Instant};
+
+    static PLAYING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _playing = PLAYING.try_lock().map_err(|_| anyhow::anyhow!("快捷键序列正在回放"))?;
+    let mut held = Vec::<&KeySequenceEvent>::new();
+    let mut due = Instant::now();
+    let result = (|| {
+        for event in events {
+            due += Duration::from_millis(event.delay_ms.into());
+            std::thread::sleep(due.saturating_duration_since(Instant::now()));
+            send_key_event(event, !event.down)?;
+            let id = (event.vk, event.scan, event.extended);
+            if event.down {
+                held.push(event);
+            } else {
+                held.retain(|e| (e.vk, e.scan, e.extended) != id);
+            }
+        }
+        Ok(())
+    })();
+    for event in held.into_iter().rev() {
+        let _ = send_key_event(event, true);
+    }
+    result
+}
+
+fn send_key_event(event: &KeySequenceEvent, up: bool) -> Result<()> {
+    let vk = VIRTUAL_KEY(event.vk);
+    let mut data = key_input(vk, up);
+    let key = unsafe { &mut data.Anonymous.ki };
+    key.dwFlags = if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) };
+    if event.extended {
+        key.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    }
+    // Pause and Print Screen use special multi-byte hardware sequences.
+    if event.scan != 0 && !matches!(vk, VK_PAUSE | VK_SNAPSHOT) {
+        key.wVk = VIRTUAL_KEY(0);
+        key.wScan = event.scan;
+        key.dwFlags |= KEYEVENTF_SCANCODE;
+    }
+    if unsafe { SendInput(&[data], size_of::<INPUT>() as i32) } != 1 {
+        bail!("发送按键失败: {}", event.label);
     }
     Ok(())
 }
