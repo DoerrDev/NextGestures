@@ -171,9 +171,66 @@ pub fn parse_key(name: &str) -> Option<VIRTUAL_KEY> {
     })
 }
 
+/// parse_key 的反向：录制快捷键时把虚拟键码转回配置里用的名字。修饰键不在此列
+pub fn key_name(vk: VIRTUAL_KEY) -> Option<String> {
+    let c = vk.0;
+    if (VK_F1.0..=VK_F24.0).contains(&c) {
+        return Some(format!("f{}", c - VK_F1.0 + 1));
+    }
+    if (0x30..=0x39).contains(&c) || (0x41..=0x5A).contains(&c) {
+        return Some((c as u8 as char).to_ascii_lowercase().to_string());
+    }
+    let name = match vk {
+        VK_TAB => "tab",
+        VK_RETURN => "enter",
+        VK_ESCAPE => "esc",
+        VK_SPACE => "space",
+        VK_BACK => "backspace",
+        VK_DELETE => "delete",
+        VK_INSERT => "insert",
+        VK_HOME => "home",
+        VK_END => "end",
+        VK_PRIOR => "pgup",
+        VK_NEXT => "pgdn",
+        VK_UP => "up",
+        VK_DOWN => "down",
+        VK_LEFT => "left",
+        VK_RIGHT => "right",
+        VK_SNAPSHOT => "printscreen",
+        VK_CAPITAL => "capslock",
+        VK_OEM_MINUS => "-",
+        VK_OEM_PLUS => "=",
+        VK_OEM_COMMA => ",",
+        VK_OEM_PERIOD => ".",
+        VK_OEM_2 => "/",
+        VK_OEM_1 => ";",
+        VK_OEM_7 => "'",
+        VK_OEM_4 => "[",
+        VK_OEM_6 => "]",
+        VK_OEM_5 => "\\",
+        VK_OEM_3 => "`",
+        _ => return None,
+    };
+    Some(name.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_names_round_trip_through_parse_key() {
+        for code in 0..=0xFFu16 {
+            let vk = VIRTUAL_KEY(code);
+            if let Some(name) = key_name(vk) {
+                assert_eq!(parse_key(&name), Some(vk), "{name}");
+            }
+        }
+        assert_eq!(key_name(VK_F1).as_deref(), Some("f1"));
+        assert_eq!(key_name(VK_LEFT).as_deref(), Some("left"));
+        assert_eq!(key_name(VIRTUAL_KEY(b'A' as u16)).as_deref(), Some("a"));
+        assert_eq!(key_name(VK_LWIN), None);
+    }
 
     #[test]
     fn parses_common_keys() {

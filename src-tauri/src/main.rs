@@ -42,6 +42,9 @@ fn main() {
     let state = AppState::load(dir.join("config.toml")).expect("加载配置失败");
 
     tauri::Builder::default()
+        // 默认情况下窗口聚焦时会注册 Raw Input，此时系统不再回调本进程的低级键盘钩子，
+        // 设置窗口在前台时快捷键录制就一个键都收不到。我们不用 DeviceEvent，直接关掉
+        .device_event_filter(tauri::DeviceEventFilter::Always)
         // 只允许一个后台实例运行；重复启动时唤醒首实例的设置窗口。
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_settings(app);
@@ -64,6 +67,8 @@ fn main() {
             commands::cancel_recording,
             commands::begin_pick,
             commands::cancel_pick,
+            commands::begin_key_recording,
+            commands::cancel_key_recording,
             commands::set_enabled,
             commands::is_enabled,
             commands::foreground_exe,

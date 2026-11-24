@@ -134,6 +134,9 @@ export const api = {
   cancelRecording: () => invoke<void>('cancel_recording'),
   beginPick: () => invoke<void>('begin_pick'),
   cancelPick: () => invoke<void>('cancel_pick'),
+  /** 结果通过 `hotkey:mods` / `hotkey:recorded` 事件回报 */
+  beginKeyRecording: () => invoke<void>('begin_key_recording'),
+  cancelKeyRecording: () => invoke<void>('cancel_key_recording'),
   setEnabled: (enabled: boolean) => invoke<void>('set_enabled', { enabled }),
   isEnabled: () => invoke<boolean>('is_enabled'),
   foregroundExe: () => invoke<string>('foreground_exe'),

@@ -1255,11 +1255,6 @@ textarea {
   padding: 2px 8px;
 }
 
-.hotkey-box button.tag {
-  cursor: pointer;
-  font-family: inherit;
-}
-
 .hotkey-hint {
   font-size: 13px;
   color: var(--color-pencil-gray);

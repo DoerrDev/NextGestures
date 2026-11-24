@@ -1,6 +1,7 @@
 use std::sync::atomic::Ordering::Relaxed;
 
 use gesture_core::{Action, Config, Gesture, PluginSettings, Profile, Settings};
+use gesture_platform::keyrec::{self, KeyRecEvent};
 use gesture_platform::{hook, window};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -159,6 +160,23 @@ pub fn begin_pick() {
 #[tauri::command]
 pub fn cancel_pick() {
     hook::cancel_pick();
+}
+
+/// 录制快捷键：由原生键盘钩子抢在系统和其它软件的热键之前截获按键，
+/// 按住的修饰键通过 `hotkey:mods` 实时回报，录到的组合键通过 `hotkey:recorded` 回报
+#[tauri::command]
+pub fn begin_key_recording(app: AppHandle) {
+    keyrec::begin(move |ev| {
+        let _ = match ev {
+            KeyRecEvent::Mods(mods) => app.emit("hotkey:mods", mods),
+            KeyRecEvent::Done(keys) => app.emit("hotkey:recorded", keys),
+        };
+    });
+}
+
+#[tauri::command]
+pub fn cancel_key_recording() {
+    keyrec::cancel();
 }
 
 #[tauri::command]

@@ -5,7 +5,7 @@ compile_error!("目前仅支持 Windows，移植时在此处新增 platform 模�
 mod windows;
 
 #[cfg(windows)]
-pub use windows::{clipboard, hook, hotkey, input, pin, shell, window};
+pub use windows::{clipboard, hook, hotkey, input, keyrec, pin, shell, window};
 #[cfg(windows)]
 pub use windows::region::select_region;
 #[cfg(windows)]

@@ -1,5 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { listen } from '@tauri-apps/api/event'
 import { Keyboard, X } from 'lucide-react'
+import { api } from '../api'
 import { t } from '../i18n'
 
 interface Props {
@@ -7,84 +9,42 @@ interface Props {
   onChange: (keys: string[]) => void
 }
 
-const MODIFIERS = ['Control', 'Alt', 'Shift', 'Meta', 'ContextMenu']
 const CHIPS = ['ctrl', 'alt', 'shift', 'win']
-
-const CODE_MAP: Record<string, string> = {
-  Escape: 'esc',
-  Enter: 'enter',
-  NumpadEnter: 'enter',
-  Tab: 'tab',
-  Space: 'space',
-  Backspace: 'backspace',
-  Delete: 'delete',
-  Insert: 'insert',
-  Home: 'home',
-  End: 'end',
-  PageUp: 'pgup',
-  PageDown: 'pgdn',
-  ArrowUp: 'up',
-  ArrowDown: 'down',
-  ArrowLeft: 'left',
-  ArrowRight: 'right',
-  PrintScreen: 'printscreen',
-  CapsLock: 'capslock',
-  Minus: '-',
-  Equal: '=',
-  Comma: ',',
-  Period: '.',
-  Slash: '/',
-  Semicolon: ';',
-  Quote: "'",
-  BracketLeft: '[',
-  BracketRight: ']',
-  Backslash: '\\',
-  Backquote: '`',
-}
-
-/** 把浏览器 keycode 转成后端 parse_key 认识的名字 */
-function mainKey(code: string): string | null {
-  if (code.startsWith('Key')) return code.slice(3).toLowerCase()
-  if (code.startsWith('Digit')) return code.slice(5)
-  if (/^F([1-9]|1[0-9]|2[0-4])$/.test(code)) return code.toLowerCase()
-  return CODE_MAP[code] ?? null
-}
 
 export function HotkeyRecorder({ keys, onChange }: Props) {
   const [recording, setRecording] = useState(false)
   const [mods, setMods] = useState<string[]>([])
+  // 父组件每次渲染都会传新的 onChange，不能让它重启原生录制
+  const onChangeRef = useRef(onChange)
+  onChangeRef.current = onChange
 
+  // 按键由后端的低级键盘钩子截获：它先于系统和其它软件的热键执行，
+  // 所以 Win+方向键、被别的程序占用的 F1 等都能录到，且录制时不会触发它们
   useEffect(() => {
     if (!recording) return
 
-    const onKeyDown = (e: KeyboardEvent) => {
-      e.preventDefault()
-      e.stopPropagation()
-      if (MODIFIERS.includes(e.key)) return
-      const key = mainKey(e.code)
-      if (!key) return
-      // Win+方向键等系统快捷键会被 OS 抢走，Win 通过点击芯片预选，其余修饰键按住即可
-      const held = {
-        ctrl: e.ctrlKey,
-        alt: e.altKey,
-        shift: e.shiftKey,
-        win: e.metaKey,
-      }
-      onChange([...CHIPS.filter((m) => held[m as keyof typeof held] || mods.includes(m)), key])
-      setRecording(false)
-    }
+    let alive = true
+    const listeners = Promise.all([
+      listen<string[]>('hotkey:mods', (e) => setMods(e.payload)),
+      listen<string[]>('hotkey:recorded', (e) => {
+        onChangeRef.current(e.payload)
+        setRecording(false)
+      }),
+    ])
+    // 监听就绪后再装钩子，避免漏掉结果
+    void listeners.then(() => {
+      if (alive) void api.beginKeyRecording()
+    })
 
     const stop = () => setRecording(false)
-    window.addEventListener('keydown', onKeyDown, true)
     window.addEventListener('blur', stop)
     return () => {
-      window.removeEventListener('keydown', onKeyDown, true)
+      alive = false
       window.removeEventListener('blur', stop)
+      void listeners.then((fns) => fns.forEach((off) => off()))
+      void api.cancelKeyRecording()
     }
-  }, [recording, onChange, mods])
-
-  const toggleMod = (m: string) =>
-    setMods((prev) => (prev.includes(m) ? prev.filter((x) => x !== m) : [...prev, m]))
+  }, [recording])
 
   const startRecording = () => {
     setMods([])
@@ -97,14 +57,9 @@ export function HotkeyRecorder({ keys, onChange }: Props) {
         {recording ? (
           <>
             {CHIPS.map((m) => (
-              <button
-                type="button"
-                key={m}
-                className={mods.includes(m) ? 'tag blue' : 'tag mute'}
-                onClick={() => toggleMod(m)}
-              >
+              <span key={m} className={mods.includes(m) ? 'tag blue' : 'tag mute'}>
                 {m}
-              </button>
+              </span>
             ))}
             <span className="hotkey-hint">{t('pressKeys')}</span>
           </>
