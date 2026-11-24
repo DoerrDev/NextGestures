@@ -9,6 +9,7 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@fontsource/caveat": "^5.3.0",
     "@fontsource/inter": "^5.2.0",
     "@fontsource/jetbrains-mono": "^5.3.0",
     "@fontsource/manrope": "^5.2.0",

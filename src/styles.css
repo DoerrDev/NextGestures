@@ -2,6 +2,7 @@
 @import '@fontsource/jetbrains-mono/400.css';
 @import '@fontsource/jetbrains-mono/500.css';
 @import '@fontsource/jetbrains-mono/600.css';
+@import '@fontsource/caveat/latin-700.css';
 
 :root {
   --color-cream-paper: #f4efea;
@@ -563,9 +564,35 @@ textarea {
   display: flex;
   align-items: center;
   gap: var(--spacing-8);
-  font-size: var(--text-body-lg);
-  font-weight: 600;
-  text-transform: uppercase;
+}
+
+/* 手写字标：加载时从左到右"写"出来 */
+.brand-wordmark {
+  font-family: 'Caveat', 'Segoe Print', cursive;
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  padding: 0 4px 2px 0;
+}
+
+.brand-wordmark.writing {
+  animation: brand-write 1.1s cubic-bezier(0.45, 0.05, 0.35, 1) both;
+}
+
+@keyframes brand-write {
+  from {
+    clip-path: inset(-20% 100% -20% 0);
+  }
+  to {
+    clip-path: inset(-20% 0 -20% 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand-wordmark.writing {
+    animation: none;
+  }
 }
 
 .version-tag {

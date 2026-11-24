@@ -16,11 +16,11 @@ import {
   PowerOff,
   Search,
   Settings2,
-  Spline,
   Trash2,
   TriangleAlert,
   Zap,
 } from 'lucide-react'
+import BrandMark from './components/BrandMark'
 import {
   api,
   cloneGesture,
@@ -66,6 +66,8 @@ export function App() {
   const [update, setUpdate] = useState<Update | null>(null)
   const [updateOpen, setUpdateOpen] = useState(false)
   const [version, setVersion] = useState('')
+  // 手写动画只在页面首次加载时播放；播完摘掉动画类，窗口再次显示时不会重播
+  const [brandWritten, setBrandWritten] = useState(false)
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
   const [menuId, setMenuId] = useState('')
@@ -233,8 +235,13 @@ export function App() {
     <div className="shell">
       <header className="topbar">
         <div className="brand">
-          <Spline size={22} strokeWidth={2} />
-          {t('appName')}
+          <BrandMark size={24} />
+          <span
+            className={brandWritten ? 'brand-wordmark' : 'brand-wordmark writing'}
+            onAnimationEnd={() => setBrandWritten(true)}
+          >
+            {t('appName')}
+          </span>
         </div>
         {version && (
           <button

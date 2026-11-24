@@ -175,33 +175,7 @@ fn build_tray(app: &mut App) -> tauri::Result<()> {
     Ok(())
 }
 
-/// 32x32 蓝底白 "N"，省掉一个图标文件
+/// 托盘图标：与应用图标同源（icons/icon.svg 生成的 32x32）
 fn tray_icon() -> Image<'static> {
-    const N: i32 = 32;
-    const STROKE: [(f32, f32); 4] = [(9.0, 23.0), (9.0, 9.0), (23.0, 23.0), (23.0, 9.0)];
-    let mut rgba = vec![0u8; (N * N * 4) as usize];
-    for y in 0..N {
-        for x in 0..N {
-            let i = ((y * N + x) * 4) as usize;
-            let (fx, fy) = (x as f32, y as f32);
-            if (fx - 15.5).powi(2) + (fy - 15.5).powi(2) > 15.5f32.powi(2) {
-                continue;
-            }
-            let on_stroke = STROKE
-                .windows(2)
-                .any(|s| dist_to_segment((fx, fy), s[0], s[1]) < 1.8);
-            let c: [u8; 4] =
-                if on_stroke { [0xff, 0xff, 0xff, 0xff] } else { [0x2b, 0x6c, 0xb0, 0xff] };
-            rgba[i..i + 4].copy_from_slice(&c);
-        }
-    }
-    Image::new_owned(rgba, N as u32, N as u32)
-}
-
-fn dist_to_segment(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
-    let (vx, vy) = (b.0 - a.0, b.1 - a.1);
-    let (wx, wy) = (p.0 - a.0, p.1 - a.1);
-    let len2 = vx * vx + vy * vy;
-    let t = if len2 <= f32::EPSILON { 0.0 } else { ((wx * vx + wy * vy) / len2).clamp(0.0, 1.0) };
-    ((wx - t * vx).powi(2) + (wy - t * vy).powi(2)).sqrt()
+    Image::from_bytes(include_bytes!("../icons/32x32.png")).expect("embedded tray icon is a valid PNG")
 }

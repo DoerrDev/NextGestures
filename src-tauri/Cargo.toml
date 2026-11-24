@@ -9,7 +9,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 gesture-core = { path = "../crates/core" }
 gesture-platform = { path = "../crates/platform" }
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
