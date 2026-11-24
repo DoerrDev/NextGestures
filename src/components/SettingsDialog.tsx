@@ -169,7 +169,7 @@ export function SettingsDialog({ initial, initialPlugins, configPath, unread, on
 
   return (
     <div className="mask" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="dialog">
+      <div className="dialog settings-dialog">
         <div className="dialog-head">
           <h2>{t('settings')}</h2>
           <button type="button" className="btn-icon" onClick={onClose} title={t('cancel')}>
@@ -193,7 +193,7 @@ export function SettingsDialog({ initial, initialPlugins, configPath, unread, on
             ))}
           </nav>
 
-          <div className="tab-panel">
+          <div className="tab-panel" key={tab}>
             {tab === 'trigger' && (
               <>
                 <div className="field">
@@ -251,7 +251,16 @@ export function SettingsDialog({ initial, initialPlugins, configPath, unread, on
                 <label className="check field">
                   <input
                     type="checkbox"
-                    checked={s.show_trail}
+                    checked={s.quiet_mode}
+                    onChange={(e) => setS({ ...s, quiet_mode: e.target.checked })}
+                  />
+                  {t('quietMode')}
+                </label>
+                <label className="check field">
+                  <input
+                    type="checkbox"
+                    checked={s.show_trail && !s.quiet_mode}
+                    disabled={s.quiet_mode}
                     onChange={(e) => setS({ ...s, show_trail: e.target.checked })}
                   />
                   {t('showTrail')}

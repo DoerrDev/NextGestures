@@ -185,9 +185,8 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
                     raw: vec![point],
                     fired: false,
                     shown_name: None,
-                    show_trail: true,
+                    show_trail: begin_trail(&app),
                 });
-                session.as_mut().unwrap().show_trail = begin_trail(&app);
                 emit_live(&app, session.as_ref().unwrap());
             }
             HookEvent::Wheel { dir, region } => {
@@ -200,7 +199,7 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
                     raw: vec![],
                     fired: false,
                     shown_name: None,
-                    show_trail: show_trail_enabled(&app),
+                    show_trail: false, // 纯滚轮手势没有轨迹
                 });
                 s.wheel.push(dir);
                 emit_live(&app, s);
@@ -278,6 +277,9 @@ fn begin_trail(app: &AppHandle) -> bool {
     let state = app.state::<AppState>();
     let mut style = {
         let cfg = state.config.read().unwrap();
+        if cfg.settings.quiet_mode {
+            return false;
+        }
         TrailBegin {
             origin: [0, 0],
             color: cfg.settings.trail_color.clone(),
@@ -300,8 +302,8 @@ fn begin_trail(app: &AppHandle) -> bool {
     show_trail
 }
 
-fn show_trail_enabled(app: &AppHandle) -> bool {
-    app.state::<AppState>().config.read().unwrap().settings.show_trail
+fn show_match_hint(app: &AppHandle) -> bool {
+    !app.state::<AppState>().config.read().unwrap().settings.quiet_mode
 }
 
 fn emit_live(app: &AppHandle, s: &Session) {
@@ -370,7 +372,9 @@ fn on_partial(app: &AppHandle, s: &mut Session) {
     let name = hit.as_ref().map(|h| h.name.clone());
     if name != s.shown_name {
         s.shown_name = name.clone();
-        let _ = app.emit_to(overlay::LABEL, "trail:match", name);
+        if show_match_hint(app) {
+            let _ = app.emit_to(overlay::LABEL, "trail:match", name);
+        }
     }
     if let Some(hit) = hit
         && hit.fire_mode == FireMode::Immediate
@@ -468,7 +472,7 @@ fn nearest(
 
 fn fire(app: &AppHandle, exe: &str, hit: Hit, show_hint: bool) {
     log::info!("命中手势 {} (score {:.3}) @ {}", hit.name, hit.score, exe);
-    if show_hint {
+    if show_hint && show_match_hint(app) {
         let state = app.state::<AppState>();
         let cfg = state.config.read().unwrap();
         let _ = app.emit_to(

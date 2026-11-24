@@ -163,6 +163,8 @@ pub struct Settings {
     /// 相似度阈值 [0,1]
     pub match_threshold: f32,
     pub show_trail: bool,
+    #[serde(default)]
+    pub quiet_mode: bool,
     pub trail_color: String,
     pub trail_width: f32,
     /// 轨迹辉光颜色
@@ -260,6 +262,7 @@ impl Default for Settings {
             move_threshold: 20,
             match_threshold: 0.80,
             show_trail: true,
+            quiet_mode: false,
             trail_color: "#4d4dff".into(),
             trail_width: 3.0,
             glow_color: default_glow_color(),

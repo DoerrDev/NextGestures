@@ -56,6 +56,7 @@ export interface Settings {
   move_threshold: number
   match_threshold: number
   show_trail: boolean
+  quiet_mode: boolean
   trail_color: string
   trail_width: number
   glow_color: string

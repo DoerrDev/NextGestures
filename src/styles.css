@@ -393,11 +393,32 @@ textarea {
   box-shadow: var(--shadow-hard-sm);
 }
 
-.settings-body {
+.settings-dialog {
+  height: 640px;
+}
+
+.settings-dialog > .dialog-head,
+.settings-dialog > .dialog-foot {
+  flex-shrink: 0;
+}
+
+.settings-dialog > .settings-body {
+  flex: 1;
+  min-height: 0;
   display: grid;
-  grid-template-columns: 172px 1fr;
+  grid-template-columns: 172px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   gap: var(--spacing-20);
-  align-items: start;
+  overflow: hidden;
+}
+
+.settings-body > .tabs,
+.settings-body > .tab-panel {
+  overflow-y: auto;
+}
+
+.settings-body > .tab-panel {
+  scrollbar-gutter: stable;
 }
 
 .blacklist-help {

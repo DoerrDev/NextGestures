@@ -124,6 +124,7 @@ const zhCN = {
   moveThreshold: '进入手势的最小距离 (px)',
   matchThreshold: '相似度阈值',
   showTrail: '显示手势轨迹',
+  quietMode: '安静模式（隐藏轨迹和命中提示）',
   trailColor: '轨迹颜色',
   trailWidth: '轨迹粗细',
   pickColor: '屏幕取色',
