@@ -1,17 +1,22 @@
 use anyhow::{Context, Result, bail, ensure};
+use gesture_platform::{
+    RecordingButton, draw_recording_button, paint_toolbar_surface, release_toolbar_frame,
+    set_toolbar_rounding, show_toolbar_frame,
+};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Controls::DRAWITEMSTRUCT;
 use windows::Win32::UI::Controls::Dialogs::*;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, VK_ESCAPE};
@@ -25,6 +30,7 @@ const START_STOP: usize = 100;
 const CANCEL: usize = 101;
 const SETTINGS: usize = 102;
 const FINISH: u32 = WM_APP + 1;
+const HOVER_TIMER: usize = 1;
 
 #[derive(Clone, Copy)]
 struct Region {
@@ -181,7 +187,6 @@ fn show_controls(app: &AppHandle, region: Region) -> Result<()> {
             lpszClassName: class,
             lpfnWndProc: Some(controls_proc),
             hCursor: LoadCursorW(None, IDC_ARROW)?,
-            hbrBackground: GetSysColorBrush(COLOR_BTNFACE),
             ..Default::default()
         });
         RegisterClassW(&WNDCLASSW {
@@ -210,13 +215,13 @@ fn show_controls(app: &AppHandle, region: Region) -> Result<()> {
         let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
         let scale_dpi = dpi_x as i32;
         let scale = |value: i32| (value * scale_dpi + 48) / 96;
-        let (bar_w, bar_h, gap) = (scale(356), scale(48), scale(8));
+        let (bar_w, bar_h, gap) = (scale(290), scale(42), scale(8));
         let (x, y) = toolbar_position(selected, work, bar_w, bar_h, gap);
         let toolbar = Window(CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_CONTROLPARENT,
             class,
             w!("区域录屏"),
-            WS_POPUP | WS_BORDER,
+            WS_POPUP | WS_CLIPCHILDREN,
             x,
             y,
             bar_w,
@@ -229,15 +234,17 @@ fn show_controls(app: &AppHandle, region: Region) -> Result<()> {
         // The bar can overlap a selection that fills the work area. Exclude it from capture
         // where Windows supports it. The outline's window region never overlaps the selection.
         let _ = SetWindowDisplayAffinity(toolbar.0, WDA_EXCLUDEFROMCAPTURE);
+        set_toolbar_rounding(toolbar.0, bar_w, bar_h, f64::from(dpi_x) / 96.0, true);
+        let button_style = WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32);
         let button = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             w!("BUTTON"),
             w!("开始录制"),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_DEFPUSHBUTTON as u32),
-            scale(7),
-            scale(7),
-            scale(122),
-            scale(32),
+            button_style,
+            scale(8),
+            scale(5),
+            scale(92),
+            scale(30),
             Some(toolbar.0),
             Some(HMENU(START_STOP as _)),
             Some(instance),
@@ -247,11 +254,11 @@ fn show_controls(app: &AppHandle, region: Region) -> Result<()> {
             WINDOW_EX_STYLE::default(),
             w!("BUTTON"),
             w!("取消"),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-            scale(273),
-            scale(7),
-            scale(76),
-            scale(32),
+            button_style,
+            scale(252),
+            scale(5),
+            scale(30),
+            scale(30),
             Some(toolbar.0),
             Some(HMENU(CANCEL as _)),
             Some(instance),
@@ -260,27 +267,17 @@ fn show_controls(app: &AppHandle, region: Region) -> Result<()> {
         let settings = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             w!("BUTTON"),
-            w!("原始 · 30 FPS ▾"),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-            scale(135),
-            scale(7),
-            scale(132),
-            scale(32),
+            w!("原始 · 30 FPS"),
+            button_style,
+            scale(108),
+            scale(5),
+            scale(142),
+            scale(30),
             Some(toolbar.0),
             Some(HMENU(SETTINGS as _)),
             Some(instance),
             None,
         )?;
-        let font = GetStockObject(DEFAULT_GUI_FONT);
-        for child in [button, settings, cancel] {
-            SendMessageW(
-                child,
-                WM_SETFONT,
-                Some(WPARAM(font.0 as usize)),
-                Some(LPARAM(1)),
-            );
-        }
-
         let line = scale(3).max(2);
         let outline_w = region.width + line * 2;
         let outline_h = region.height + line * 2;
@@ -298,8 +295,52 @@ fn show_controls(app: &AppHandle, region: Region) -> Result<()> {
             Some(instance),
             None,
         )?);
-        let outer = CreateRectRgn(0, 0, outline_w, outline_h);
-        let inner = CreateRectRgn(line, line, region.width + line, region.height + line);
+        // An outside stroke falls off the desktop when a selection touches an edge.
+        // Move the affected side inside the visible screen when capture can exclude it.
+        let excluded = SetWindowDisplayAffinity(border.0, WDA_EXCLUDEFROMCAPTURE).is_ok();
+        let monitor_bounds = info.rcMonitor;
+        let mut intersect = RECT::default();
+        let _ = IntersectRect(&mut intersect, &selected, &monitor_bounds);
+        let bounds = if intersect == selected {
+            monitor_bounds
+        } else {
+            let left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            RECT {
+                left,
+                top,
+                right: left + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                bottom: top + GetSystemMetrics(SM_CYVIRTUALSCREEN),
+            }
+        };
+        let (left, top, right, bottom) = if excluded {
+            (
+                if selected.left - line < bounds.left {
+                    line
+                } else {
+                    0
+                },
+                if selected.top - line < bounds.top {
+                    line
+                } else {
+                    0
+                },
+                if selected.right + line > bounds.right {
+                    outline_w - line
+                } else {
+                    outline_w
+                },
+                if selected.bottom + line > bounds.bottom {
+                    outline_h - line
+                } else {
+                    outline_h
+                },
+            )
+        } else {
+            (0, 0, outline_w, outline_h)
+        };
+        let outer = CreateRectRgn(left, top, right, bottom);
+        let inner = CreateRectRgn(left + line, top + line, right - line, bottom - line);
         let combined = CombineRgn(Some(outer), Some(outer), Some(inner), RGN_DIFF);
         let _ = DeleteObject(inner.into());
         if combined == RGN_ERROR || SetWindowRgn(border.0, Some(outer), false) == 0 {
@@ -327,6 +368,8 @@ fn show_controls(app: &AppHandle, region: Region) -> Result<()> {
         let _ = ShowWindow(controls.border.0, SW_SHOWNOACTIVATE);
         let _ = ShowWindow(toolbar.0, SW_SHOW);
         let _ = SetForegroundWindow(toolbar.0);
+        let _ = SetTimer(Some(toolbar.0), HOVER_TIMER, 60, None);
+        let mut hot = HWND::default();
         let mut message = MSG::default();
         loop {
             match GetMessageW(&mut message, None, 0, 0).0 {
@@ -345,6 +388,26 @@ fn show_controls(app: &AppHandle, region: Region) -> Result<()> {
                 }
                 break;
             }
+            if message.hwnd == toolbar.0
+                && message.message == WM_TIMER
+                && message.wParam.0 == HOVER_TIMER
+            {
+                let mut cursor = POINT::default();
+                let next = if GetCursorPos(&mut cursor).is_ok() {
+                    WindowFromPoint(cursor)
+                } else {
+                    HWND::default()
+                };
+                if hot != next {
+                    for child in [button, settings, cancel] {
+                        if child == hot || child == next {
+                            let _ = InvalidateRect(Some(child), None, false);
+                        }
+                    }
+                    hot = next;
+                }
+                continue;
+            }
             if message.message == WM_KEYDOWN && message.wParam.0 == VK_ESCAPE.0 as usize {
                 let _ = PostMessageW(Some(toolbar.0), WM_CLOSE, WPARAM(0), LPARAM(0));
             } else if !IsDialogMessageW(toolbar.0, &message).as_bool() {
@@ -359,7 +422,7 @@ fn show_controls(app: &AppHandle, region: Region) -> Result<()> {
 fn toolbar_position(region: RECT, work: RECT, width: i32, height: i32, gap: i32) -> (i32, i32) {
     let clamp_x = |x: i32| x.clamp(work.left, (work.right - width).max(work.left));
     let clamp_y = |y: i32| y.clamp(work.top, (work.bottom - height).max(work.top));
-    let x = clamp_x(region.right - width);
+    let x = clamp_x(region.left + (region.right - region.left - width) / 2);
     if region.bottom + gap + height <= work.bottom {
         (x, clamp_y(region.bottom + gap))
     } else if region.top - gap - height >= work.top {
@@ -401,6 +464,52 @@ unsafe extern "system" fn border_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
 
 unsafe extern "system" fn controls_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
+        match msg {
+            WM_ERASEBKGND => return LRESULT(1),
+            WM_SHOWWINDOW => show_toolbar_frame(hwnd, wp.0 != 0),
+            WM_DESTROY => release_toolbar_frame(hwnd),
+            WM_PAINT => {
+                let mut paint = PAINTSTRUCT::default();
+                let dc = BeginPaint(hwnd, &mut paint);
+                let mut rect = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rect);
+                paint_toolbar_surface(
+                    hwnd,
+                    dc,
+                    &rect,
+                    f64::from(GetDpiForWindow(hwnd).max(96)) / 96.0,
+                );
+                let _ = EndPaint(hwnd, &paint);
+                return LRESULT(0);
+            }
+            WM_DRAWITEM if lp.0 != 0 => {
+                // Drawing is reentrant during SetWindowText; read the button only.
+                let item = &*(lp.0 as *const DRAWITEMSTRUCT);
+                let kind = match item.CtlID as usize {
+                    START_STOP if GetWindowLongPtrW(item.hwndItem, GWLP_USERDATA) != 0 => {
+                        RecordingButton::Stop
+                    }
+                    START_STOP => RecordingButton::Start,
+                    SETTINGS => RecordingButton::Settings,
+                    CANCEL => RecordingButton::Close,
+                    _ => return DefWindowProcW(hwnd, msg, wp, lp),
+                };
+                let mut caption = [0u16; 64];
+                let length = if matches!(kind, RecordingButton::Close) {
+                    0
+                } else {
+                    GetWindowTextW(item.hwndItem, &mut caption) as usize
+                };
+                let label = String::from_utf16_lossy(&caption[..length]);
+                let mut cursor = POINT::default();
+                let hot =
+                    GetCursorPos(&mut cursor).is_ok() && WindowFromPoint(cursor) == item.hwndItem;
+                let scale = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
+                draw_recording_button(item, scale, kind, &label, hot);
+                return LRESULT(1);
+            }
+            _ => {}
+        }
         let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Controls;
         // Only command and close messages access state. APIs below can reenter the procedure
         // with paint/activation messages, which are handled without that state.
@@ -451,6 +560,7 @@ unsafe extern "system" fn controls_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                                     cancelled: false,
                                 });
                                 let _ = EnableWindow(controls.settings, false);
+                                SetWindowLongPtrW(controls.button, GWLP_USERDATA, 1);
                                 let _ = SetWindowTextW(controls.button, w!("停止录制"));
                             }
                             Err(error) => {
@@ -480,7 +590,7 @@ unsafe extern "system" fn controls_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                             Setting::Quality(quality) => controls.quality = quality,
                         }
                         let caption: Vec<u16> =
-                            format!("{} · {} FPS ▾", controls.quality.label(), controls.fps)
+                            format!("{} · {} FPS", controls.quality.label(), controls.fps)
                                 .encode_utf16()
                                 .chain(Some(0))
                                 .collect();

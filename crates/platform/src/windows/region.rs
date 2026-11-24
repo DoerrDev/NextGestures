@@ -344,7 +344,32 @@ fn paint(hwnd: HWND) {
                 let mut inside = RECT::default();
                 if IntersectRect(&mut inside, &dirty, &rect).as_bool() {
                     let _ = FillRect(frame.dc, &inside, frame.interior);
-                    let _ = FrameRect(frame.dc, &rect, frame.outline);
+                    let horizontal = (rect.right - rect.left).min(2);
+                    let vertical = (rect.bottom - rect.top).min(2);
+                    let sides = [
+                        RECT {
+                            right: rect.left + horizontal,
+                            ..rect
+                        },
+                        RECT {
+                            left: rect.right - horizontal,
+                            ..rect
+                        },
+                        RECT {
+                            bottom: rect.top + vertical,
+                            ..rect
+                        },
+                        RECT {
+                            top: rect.bottom - vertical,
+                            ..rect
+                        },
+                    ];
+                    for side in sides {
+                        let mut visible = RECT::default();
+                        if IntersectRect(&mut visible, &dirty, &side).as_bool() {
+                            let _ = FillRect(frame.dc, &visible, frame.outline);
+                        }
+                    }
                 }
             }
             // Publish the composed pixels in one operation. The layered window

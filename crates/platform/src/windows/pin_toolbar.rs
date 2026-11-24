@@ -4,12 +4,12 @@ use anyhow::{Result, ensure};
 use std::cell::RefCell;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::Controls::{
-    DRAWITEMSTRUCT, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, ODS_SELECTED,
-    TOOLTIPS_CLASSW, TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTS_ALWAYSTIP, TTS_NOPREFIX,
-    TTTOOLINFOW,
+    DRAWITEMSTRUCT, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, ODS_DISABLED,
+    ODS_FOCUS, ODS_SELECTED, TOOLTIPS_CLASSW, TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW,
+    TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -162,6 +162,188 @@ fn color(r: u8, g: u8, b: u8) -> COLORREF {
 }
 fn scaled(value: i32, scale: f64) -> i32 {
     (f64::from(value) * scale).round() as i32
+}
+
+fn toolbar_region(width: i32, height: i32, scale: f64) -> HRGN {
+    let diameter = scaled(16, scale).max(2);
+    unsafe { CreateRoundRectRgn(0, 0, width, height, diameter, diameter) }
+}
+
+const FRAME_PROPERTY: PCWSTR = w!("NextGesturesToolbarFrame");
+
+fn toolbar_frame(hwnd: HWND) -> HWND {
+    unsafe { HWND(GetPropW(hwnd, FRAME_PROPERTY).0) }
+}
+
+pub fn set_toolbar_rounding(hwnd: HWND, width: i32, height: i32, scale: f64, exclude: bool) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    unsafe {
+        if update_toolbar_frame(hwnd, width, height, scale, exclude).is_ok() {
+            return;
+        }
+        if let Ok(frame) = RemovePropW(hwnd, FRAME_PROPERTY) {
+            let _ = DestroyWindow(HWND(frame.0));
+        }
+    }
+    apply_toolbar_region(hwnd, toolbar_region(width, height, scale));
+}
+
+fn apply_toolbar_region(hwnd: HWND, region: HRGN) -> bool {
+    if !region.is_invalid() {
+        unsafe {
+            if SetWindowRgn(hwnd, Some(region), true) != 0 {
+                return true;
+            }
+            let _ = DeleteObject(region.into());
+        }
+    }
+    false
+}
+
+fn update_toolbar_frame(
+    hwnd: HWND,
+    width: i32,
+    height: i32,
+    scale: f64,
+    exclude: bool,
+) -> Result<()> {
+    let mut bounds = RECT::default();
+    unsafe { GetWindowRect(hwnd, &mut bounds)? };
+    let mut surface = super::pin::Surface::new(width, height)?;
+    let radius = (8.0 * scale as f32).max(2.0);
+    let stroke = (scale as f32).max(1.0);
+    let inset = scaled(2, scale).max(2);
+    let hole = (inset + scaled(3, scale).max(2)) as f32;
+    let (w, h) = (width as f32, height as f32);
+    for (index, pixel) in surface.bytes_mut().chunks_exact_mut(4).enumerate() {
+        let x = (index % width as usize) as f32 + 0.5;
+        let y = (index / width as usize) as f32 + 0.5;
+        let coverage = |margin: f32| {
+            let hw = w / 2.0 - margin;
+            let hh = h / 2.0 - margin;
+            let r = (radius - margin).max(0.0).min(hw).min(hh);
+            let qx = (x - w / 2.0).abs() - (hw - r);
+            let qy = (y - h / 2.0).abs() - (hh - r);
+            let distance = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r;
+            (0.5 - distance).clamp(0.0, 1.0)
+        };
+        let outer = coverage(0.0);
+        let inner = coverage(stroke).min(outer);
+        let cutout = coverage(hole).min(inner);
+        let rim = outer - inner;
+        let white = (inner - cutout) * 255.0;
+        for (channel, ink) in pixel[..3].iter_mut().zip([207.0, 198.0, 190.0]) {
+            *channel = (white + ink * rim).round() as u8;
+        }
+        pixel[3] = ((outer - cutout) * 255.0).round() as u8;
+    }
+    unsafe {
+        let mut frame = toolbar_frame(hwnd);
+        if frame.is_invalid() {
+            // This owned, click-through window supplies only the antialiased rim.
+            // The original window still paints and handles its native controls.
+            frame = CreateWindowExW(
+                WS_EX_LAYERED
+                    | WS_EX_TRANSPARENT
+                    | WS_EX_NOACTIVATE
+                    | WS_EX_TOOLWINDOW
+                    | WS_EX_TOPMOST,
+                w!("STATIC"),
+                w!(""),
+                WS_POPUP,
+                bounds.left,
+                bounds.top,
+                width,
+                height,
+                Some(hwnd),
+                None,
+                None,
+                None,
+            )?;
+            if let Err(error) = SetPropW(hwnd, FRAME_PROPERTY, Some(HANDLE(frame.0))) {
+                let _ = DestroyWindow(frame);
+                return Err(error.into());
+            }
+            if exclude {
+                SetWindowDisplayAffinity(frame, WDA_EXCLUDEFROMCAPTURE)?;
+            }
+        }
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+            ..Default::default()
+        };
+        UpdateLayeredWindow(
+            frame,
+            None,
+            Some(&POINT {
+                x: bounds.left,
+                y: bounds.top,
+            }),
+            Some(&SIZE {
+                cx: width,
+                cy: height,
+            }),
+            Some(surface.dc),
+            Some(&POINT::default()),
+            COLORREF(0),
+            Some(&blend),
+            ULW_ALPHA,
+        )?;
+        // Leave the host's binary clip underneath the opaque white part of the rim.
+        let diameter = ((radius - inset as f32) * 2.0).round().max(2.0) as i32;
+        let region = CreateRoundRectRgn(
+            inset,
+            inset,
+            width - inset,
+            height - inset,
+            diameter,
+            diameter,
+        );
+        ensure!(apply_toolbar_region(hwnd, region), "设置工具栏内容边缘失败");
+        show_toolbar_frame(hwnd, IsWindowVisible(hwnd).as_bool());
+    }
+    Ok(())
+}
+
+pub fn show_toolbar_frame(hwnd: HWND, visible: bool) {
+    let frame = toolbar_frame(hwnd);
+    if !frame.is_invalid() {
+        unsafe {
+            let _ = ShowWindow(frame, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+        }
+    }
+}
+
+pub fn release_toolbar_frame(hwnd: HWND) {
+    unsafe {
+        // The owned HWND is destroyed with its owner.
+        let _ = RemovePropW(hwnd, FRAME_PROPERTY);
+    }
+}
+
+pub fn paint_toolbar_surface(hwnd: HWND, dc: HDC, rect: &RECT, scale: f64) {
+    unsafe {
+        let _ = FillRect(dc, rect, HBRUSH(GetStockObject(WHITE_BRUSH).0));
+        if !toolbar_frame(hwnd).is_invalid() {
+            return;
+        }
+        let region = toolbar_region(rect.right, rect.bottom, scale);
+        if region.is_invalid() {
+            return;
+        }
+        let brush = CreateSolidBrush(color(190, 198, 207));
+        if !brush.is_invalid() {
+            // Stroke inside the same rounded region that clips the window.
+            let thickness = scaled(1, scale).max(1);
+            let _ = FrameRgn(dc, region, brush, thickness, thickness);
+            let _ = DeleteObject(brush.into());
+        }
+        let _ = DeleteObject(region.into());
+    }
 }
 
 /// 按钮内容的离屏 BGRA 缓冲；所有图形都按覆盖率混合，边缘抗锯齿。
@@ -351,7 +533,7 @@ pub(super) fn create(owner: HWND, alpha: u8) -> Result<()> {
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_CONTROLPARENT,
             w!("NextGesturesPinToolbar"),
             w!("贴图工具栏"),
-            WS_POPUP | WS_BORDER | WS_CLIPCHILDREN,
+            WS_POPUP | WS_CLIPCHILDREN,
             rect.left,
             rect.top,
             rect.right - rect.left,
@@ -487,17 +669,7 @@ pub(super) fn position() -> Result<()> {
             rect.bottom - rect.top,
             SWP_NOACTIVATE,
         )?;
-        let region = CreateRoundRectRgn(
-            0,
-            0,
-            rect.right - rect.left + 1,
-            rect.bottom - rect.top + 1,
-            scaled(10, scale),
-            scaled(10, scale),
-        );
-        if SetWindowRgn(state.0, Some(region), true) == 0 {
-            let _ = DeleteObject(HGDIOBJ(region.0));
-        }
+        set_toolbar_rounding(state.0, rect.right - rect.left, rect.bottom - rect.top, scale, false);
         for (id, x, y, width) in slots() {
             if let Some((_, button)) = state.1.iter().find(|(key, _)| *key == id) {
                 SetWindowPos(
@@ -692,19 +864,16 @@ fn draw_item(item: &DRAWITEMSTRUCT) {
     };
     let rc = item.rcItem;
     let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
-    let mut px = Pixels::new(w, h, color(255, 255, 255));
     let active = tool != 0 && id == tool;
     let swatch = (SWATCH..SWATCH + SWATCHES.len() as u16).contains(&id);
-    if !swatch && (pressed || active || hot == id) {
-        let back = if pressed {
-            color(203, 222, 245)
-        } else if active {
-            color(219, 234, 254)
-        } else {
-            color(238, 242, 247)
-        };
-        px.round_rect(1.0, 6.0 * scale, back);
-    }
+    let mut px = button_surface(
+        w,
+        h,
+        scale,
+        !swatch && pressed,
+        !swatch && active,
+        !swatch && hot == id,
+    );
     let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
     if swatch {
         let value = COLORREF(SWATCHES[(id - SWATCH) as usize]);
@@ -738,6 +907,93 @@ fn draw_item(item: &DRAWITEMSTRUCT) {
     px.blit(item.hDC, rc.left, rc.top);
 }
 
+fn button_surface(w: i32, h: i32, scale: f32, pressed: bool, active: bool, hot: bool) -> Pixels {
+    let mut pixels = Pixels::new(w, h, color(255, 255, 255));
+    if pressed || active || hot {
+        let fill = if pressed {
+            color(203, 222, 245)
+        } else if active {
+            color(219, 234, 254)
+        } else {
+            color(238, 242, 247)
+        };
+        pixels.round_rect(1.0, 6.0 * scale, fill);
+    }
+    pixels
+}
+
+/// Recorder buttons share the screenshot toolbar's colors and Lucide renderer.
+#[derive(Clone, Copy)]
+pub enum RecordingButton {
+    Start,
+    Stop,
+    Settings,
+    Close,
+}
+
+pub fn draw_recording_button(
+    item: &DRAWITEMSTRUCT,
+    scale: f32,
+    kind: RecordingButton,
+    label: &str,
+    hot: bool,
+) {
+    let rect = item.rcItem;
+    let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+    let disabled = item.itemState.0 & ODS_DISABLED.0 != 0;
+    let pressed = item.itemState.0 & ODS_SELECTED.0 != 0;
+    let focus = item.itemState.0 & ODS_FOCUS.0 != 0;
+    let mut pixels = button_surface(
+        width,
+        height,
+        scale,
+        pressed,
+        false,
+        !disabled && (hot || focus),
+    );
+    let (svg, destructive) = match kind {
+        RecordingButton::Start => (include_str!("../../assets/lucide/circle-dot.svg"), true),
+        RecordingButton::Stop => (icons::SQUARE, true),
+        RecordingButton::Settings => (include_str!("../../assets/lucide/settings-2.svg"), false),
+        RecordingButton::Close => (icons::X, true),
+    };
+    let ink = if disabled {
+        color(148, 163, 184)
+    } else if destructive {
+        color(200, 60, 60)
+    } else {
+        color(51, 65, 85)
+    };
+    let icon_x = if label.is_empty() {
+        width as f32 / 2.0
+    } else {
+        16.0 * scale
+    };
+    pixels.icon(svg, 18.0 * scale, icon_x, height as f32 / 2.0, ink);
+    pixels.blit(item.hDC, rect.left, rect.top);
+    if !label.is_empty() {
+        let mut text = label.encode_utf16().collect::<Vec<_>>();
+        let mut area = RECT {
+            left: rect.left + (30.0 * scale).round() as i32,
+            right: rect.right - (5.0 * scale).round() as i32,
+            ..rect
+        };
+        unsafe {
+            let font = GetStockObject(DEFAULT_GUI_FONT);
+            let previous = SelectObject(item.hDC, font);
+            SetBkMode(item.hDC, TRANSPARENT);
+            SetTextColor(item.hDC, if disabled { ink } else { color(51, 65, 85) });
+            DrawTextW(
+                item.hDC,
+                &mut text,
+                &mut area,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+            );
+            SelectObject(item.hDC, previous);
+        }
+    }
+}
+
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         match message {
@@ -766,13 +1022,17 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
                 LRESULT(0)
             }
             WM_ERASEBKGND => LRESULT(1),
+            WM_SHOWWINDOW => {
+                show_toolbar_frame(hwnd, wp.0 != 0);
+                DefWindowProcW(hwnd, message, wp, lp)
+            }
             WM_PAINT => {
                 let mut paint = PAINTSTRUCT::default();
                 let dc = BeginPaint(hwnd, &mut paint);
                 let mut rect = RECT::default();
                 let _ = GetClientRect(hwnd, &mut rect);
-                FillRect(dc, &rect, HBRUSH(GetStockObject(WHITE_BRUSH).0));
                 let style = BAR.with(|b| b.borrow().as_ref().map(|b| (b.scale, b.font, b.alpha)));
+                paint_toolbar_surface(hwnd, dc, &rect, style.map_or(1.0, |(scale, _, _)| scale));
                 if let Some((scale, font, alpha)) = style {
                     let previous = SelectObject(dc, HGDIOBJ(font.0));
                     SetBkMode(dc, TRANSPARENT);
@@ -820,6 +1080,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
                 LRESULT(0)
             }
             WM_DESTROY => {
+                release_toolbar_frame(hwnd);
                 BAR.with(|b| {
                     b.borrow_mut().take();
                 });

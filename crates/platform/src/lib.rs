@@ -8,6 +8,11 @@ mod windows;
 pub use windows::{clipboard, hook, hotkey, input, pin, shell, window};
 #[cfg(windows)]
 pub use windows::region::select_region;
+#[cfg(windows)]
+pub use windows::pin_toolbar::{
+    RecordingButton, draw_recording_button, paint_toolbar_surface, release_toolbar_frame,
+    set_toolbar_rounding, show_toolbar_frame,
+};
 
 /// 鼠标状态快照
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

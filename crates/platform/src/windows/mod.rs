@@ -3,7 +3,7 @@ pub mod pin;
 mod pin_draw;
 mod pin_icons;
 mod pin_text;
-mod pin_toolbar;
+pub(crate) mod pin_toolbar;
 pub mod region;
 pub mod hook;
 mod blacklist;
