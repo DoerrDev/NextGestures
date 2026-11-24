@@ -3,6 +3,7 @@ import { api, type Action, type Plugins } from '../api'
 import { t, type Key } from '../i18n'
 import { HotkeyRecorder } from './HotkeyRecorder'
 import { KeySequenceRecorder } from './KeySequenceRecorder'
+import { ProgramPicker } from './ProgramPicker'
 
 interface Props {
   action: Action
@@ -20,7 +21,9 @@ const PLUGIN_FOR_ACTION: Partial<Record<Action['kind'], 'screenshot' | 'recorder
   ai_polish: 'quickformater',
 }
 
-const KIND_LABEL: Record<Action['kind'], Key> = {
+type EditorKind = Exclude<Action['kind'], 'launch_app'>
+
+const KIND_LABEL: Record<EditorKind, Key> = {
   none: 'actionNone',
   command: 'actionCommand',
   hotkey: 'actionHotkey',
@@ -33,9 +36,9 @@ const KIND_LABEL: Record<Action['kind'], Key> = {
   ai_polish: 'actionAiPolish',
 }
 
-const KINDS = Object.keys(KIND_LABEL) as Action['kind'][]
+const KINDS = Object.keys(KIND_LABEL) as EditorKind[]
 
-function blank(kind: Action['kind']): Action {
+function blank(kind: EditorKind): Action {
   switch (kind) {
     case 'screenshot':
     case 'record_region':
@@ -59,6 +62,7 @@ function blank(kind: Action['kind']): Action {
 export function ActionEditor({ action, plugins, onChange, onError, onRecordingChange }: Props) {
   const currentPlugin = PLUGIN_FOR_ACTION[action.kind]
   const isDisabled = currentPlugin !== undefined && !plugins[currentPlugin]
+  const editorKind = action.kind === 'launch_app' ? 'command' : action.kind
 
   const test = async () => {
     try {
@@ -74,8 +78,8 @@ export function ActionEditor({ action, plugins, onChange, onError, onRecordingCh
         <label htmlFor="action-kind">{t('actionKind')}</label>
         <select
           id="action-kind"
-          value={action.kind}
-          onChange={(e) => onChange(blank(e.target.value as Action['kind']))}
+          value={editorKind}
+          onChange={(e) => onChange(blank(e.target.value as EditorKind))}
         >
           {KINDS.map((kind) => {
             const plugin = PLUGIN_FOR_ACTION[kind]
@@ -98,6 +102,14 @@ export function ActionEditor({ action, plugins, onChange, onError, onRecordingCh
       )}
       {currentPlugin === 'quickformater' && !isDisabled && (
         <p className="field-note">{t('aiActionHint')}</p>
+      )}
+
+      {editorKind === 'command' && (
+        <ProgramPicker
+          selected={action.kind === 'launch_app' ? action.name : undefined}
+          onSelect={(app) => onChange({ kind: 'launch_app', app_id: app.id, name: app.name })}
+          onManual={() => onChange(blank('command'))}
+        />
       )}
 
       {action.kind === 'command' && (
@@ -180,6 +192,8 @@ export function describeAction(action: Action): string {
   switch (action.kind) {
     case 'command':
       return `${action.program} ${action.args.join(' ')}`.trim()
+    case 'launch_app':
+      return action.name
     case 'hotkey':
       return action.keys.join('+')
     case 'key_sequence':

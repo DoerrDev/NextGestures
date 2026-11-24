@@ -31,6 +31,7 @@ export type Action =
   | { kind: 'ai_translate' }
   | { kind: 'ai_polish' }
   | { kind: 'command'; program: string; args: string[]; shell: boolean }
+  | { kind: 'launch_app'; app_id: string; name: string }
   | { kind: 'hotkey'; keys: string[] }
   | { kind: 'key_sequence'; steps?: string[][]; events?: KeySequenceEvent[] }
   | { kind: 'open_url'; url: string }
@@ -154,6 +155,7 @@ export const api = {
   foregroundExe: () => invoke<string>('foreground_exe'),
   virtualScreenSize: () => invoke<VirtualScreenSize>('virtual_screen_size'),
   testAction: (action: Action) => invoke<void>('test_action', { action }),
+  listInstalledApps: () => invoke<InstalledApp[]>('list_installed_apps'),
   showGestureHintPreview: (hint: GestureHintPreview) =>
     invoke<void>('show_gesture_hint_preview', { hint }),
   hideGestureHintPreview: () => invoke<void>('hide_gesture_hint_preview'),
@@ -165,6 +167,11 @@ export const api = {
   feedbackSubmit: (name: string, message: string) =>
     invoke<string>('feedback_submit', { name, message }),
   feedbackAckUnread: () => invoke<void>('feedback_ack_unread'),
+}
+
+export interface InstalledApp {
+  id: string
+  name: string
 }
 
 export interface ChatItem {

@@ -20,6 +20,9 @@ pub fn spawn(app: AppHandle, action: Action) {
             if action.is_ai() {
                 crate::engine::toast(&app, &e.to_string());
             }
+            if matches!(action, Action::LaunchApp { .. }) {
+                crate::engine::toast(&app, &e.to_string());
+            }
         }
     });
 }
@@ -36,6 +39,9 @@ pub fn run(app: &AppHandle, action: &Action) -> Result<()> {
             crate::plugins::execute(app, action, &plugins)
         }
         Action::Command { program, args, shell } => run_command(program, args, *shell),
+        Action::LaunchApp { app_id, name } => {
+            shell::open_installed_app(app_id).with_context(|| format!("启动失败: {name}"))
+        }
         Action::Hotkey { keys } => input::send_hotkey(keys),
         Action::KeySequence { steps, events } => {
             if !events.is_empty() {

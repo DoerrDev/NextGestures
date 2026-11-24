@@ -84,6 +84,8 @@ pub enum Action {
     AiJyutping,
     AiTranslate,
     AiPolish,
+    /// 通过 Windows AppsFolder 打开已登记的应用
+    LaunchApp { app_id: String, name: String },
     /// 执行程序 / CMD 命令
     Command {
         program: String,

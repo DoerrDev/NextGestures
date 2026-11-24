@@ -293,6 +293,41 @@ textarea {
   margin-bottom: var(--spacing-16);
 }
 
+.program-selection {
+  margin: 0 0 8px;
+  overflow-wrap: anywhere;
+}
+
+.program-picker-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.program-picker-panel {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.program-picker-list {
+  list-style: none;
+  max-height: 176px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px;
+  border: 1px solid var(--color-charcoal-ink);
+  border-radius: var(--radius-sm);
+}
+
+.program-picker-list button {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
 .row {
   display: flex;
   gap: var(--spacing-16);

@@ -77,6 +77,7 @@ fn main() {
             commands::foreground_exe,
             commands::virtual_screen_size,
             commands::test_action,
+            commands::list_installed_apps,
             commands::show_gesture_hint_preview,
             commands::hide_gesture_hint_preview,
             commands::hide_settings,

@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use gesture_core::{Action, Config, Gesture, KeySequenceEvent, PluginSettings, Profile, Settings};
 use gesture_platform::keyrec::{self, KeyRecEvent};
-use gesture_platform::{hook, window};
+use gesture_platform::{hook, shell, window};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -22,6 +22,26 @@ pub struct GestureHintPreview {
 pub struct VirtualScreenSize {
     width: u32,
     height: u32,
+}
+
+#[derive(Serialize)]
+pub struct InstalledApp {
+    id: String,
+    name: String,
+}
+
+#[tauri::command]
+pub async fn list_installed_apps() -> R<Vec<InstalledApp>> {
+    tauri::async_runtime::spawn_blocking(|| {
+        shell::installed_apps().map(|apps| {
+            apps.into_iter()
+                .map(|app| InstalledApp { id: app.id, name: app.name })
+                .collect()
+        })
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)
 }
 
 fn err(e: impl std::fmt::Display) -> String {
