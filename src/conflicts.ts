@@ -109,6 +109,7 @@ function sameTriggerContext(a: Gesture, b: Gesture): boolean {
     a.trigger === b.trigger &&
     Boolean(a.left_click) === Boolean(b.left_click) &&
     a.region === b.region &&
+    (a.dwell_ms ?? 0) > 0 === (b.dwell_ms ?? 0) > 0 &&
     a.wheel.length === b.wheel.length &&
     a.wheel.every((w, i) => w === b.wheel[i])
   )

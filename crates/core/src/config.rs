@@ -46,6 +46,17 @@ impl Region {
     pub fn bit(self) -> u8 {
         1 << (self as u8)
     }
+
+    /// 边角单击掩码里的位：每个区域占 4 位，对应 4 个触发键
+    pub fn click_bit(self, button: TriggerButton) -> u32 {
+        let idx = match button {
+            TriggerButton::Right => 0,
+            TriggerButton::Middle => 1,
+            TriggerButton::X1 => 2,
+            TriggerButton::X2 => 3,
+        };
+        1 << (self as u32 * 4 + idx)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +125,18 @@ impl Default for Action {
     }
 }
 
+impl Gesture {
+    /// 边角 + 单击：在 region 内按下并松开触发键，不画轨迹也不滚轮
+    pub fn is_edge_click(&self) -> bool {
+        self.trigger.is_some() && self.region.is_some() && self.points.is_empty() && self.wheel.is_empty()
+    }
+
+    /// 边角 + 停留
+    pub fn is_dwell(&self) -> bool {
+        self.dwell_ms > 0
+    }
+}
+
 impl Action {
     pub fn is_ai(&self) -> bool {
         matches!(self, Self::AiJyutping | Self::AiTranslate | Self::AiPolish)
@@ -141,6 +164,9 @@ pub struct Gesture {
     /// 右键轨迹终点按下左键，松开右键后识别；旧配置默认关闭
     #[serde(default)]
     pub left_click: bool,
+    /// 大于 0 表示边角停留手势：鼠标在 region 停留这么久（ms）后触发
+    #[serde(default)]
+    pub dwell_ms: u32,
     #[serde(default = "default_fire_mode")]
     pub fire_mode: FireMode,
     /// 归一化后的 64 个模板点；纯滚轮手势为空
@@ -416,14 +442,31 @@ impl Config {
         self.settings.trigger_buttons.iter().fold(0, |m, b| m | b.bit())
     }
 
-    /// 无按键边角手势用到的区域掩码，钩子只在这些区域进入无键手势态
-    pub fn region_mask(&self) -> u8 {
+    fn active_gestures(&self) -> impl Iterator<Item = &Gesture> {
         self.profiles
             .iter()
             .flat_map(|p| &p.gestures)
-            .filter(|g| g.enabled && g.trigger.is_none() && self.plugins.allows(&g.action))
+            .filter(|g| g.enabled && self.plugins.allows(&g.action))
+    }
+
+    /// 边角滚轮手势用到的区域掩码，钩子只在这些区域接管滚轮
+    pub fn region_mask(&self) -> u8 {
+        self.active_gestures()
+            .filter(|g| g.trigger.is_none() && !g.wheel.is_empty())
             .filter_map(|g| g.region)
             .fold(0, |m, r| m | r.bit())
+    }
+
+    /// 边角单击手势掩码（Region::click_bit），钩子只在这些区域接管对应按键的单击
+    pub fn edge_click_mask(&self) -> u32 {
+        self.active_gestures()
+            .filter(|g| g.is_edge_click())
+            .fold(0, |m, g| m | g.region.unwrap().click_bit(g.trigger.unwrap()))
+    }
+
+    /// 有边角停留手势时钩子才需要回报鼠标进出边角
+    pub fn has_dwell(&self) -> bool {
+        self.active_gestures().any(|g| g.is_dwell() && g.region.is_some())
     }
 
     pub fn profile_mut(&mut self, profile_id: &str) -> Option<&mut Profile> {
@@ -436,6 +479,14 @@ impl Config {
             !gesture.left_click || (gesture.trigger == Some(TriggerButton::Right) && !gesture.points.is_empty()),
             "终点左键点击需要右键轨迹"
         );
+        if gesture.is_dwell() {
+            anyhow::ensure!(
+                gesture.region.is_some() && gesture.trigger.is_none() && gesture.points.is_empty()
+                    && gesture.wheel.is_empty(),
+                "停留手势只能单独配置在屏幕边角"
+            );
+            anyhow::ensure!((100..=10_000).contains(&gesture.dwell_ms), "停留时长需在 100 ~ 10000 毫秒之间");
+        }
         let profile = self
             .profile_mut(profile_id)
             .with_context(|| format!("未找到配置组: {profile_id}"))?;
@@ -484,6 +535,7 @@ fn legacy_seed_gestures() -> [Gesture; 2] {
             region: None,
             wheel: vec![],
             left_click: false,
+            dwell_ms: 0,
             fire_mode: FireMode::OnRelease,
             points: recognizer::normalize(&shape_e()).unwrap_or_default(),
             times: vec![],
@@ -498,6 +550,7 @@ fn legacy_seed_gestures() -> [Gesture; 2] {
             region: None,
             wheel: vec![],
             left_click: false,
+            dwell_ms: 0,
             fire_mode: FireMode::Immediate,
             points: recognizer::normalize(&shape_o()).unwrap_or_default(),
             times: vec![],

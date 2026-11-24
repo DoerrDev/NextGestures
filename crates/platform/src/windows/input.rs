@@ -59,6 +59,17 @@ pub fn click(btn: TriggerButton) {
     unsafe { SendInput(&batch, size_of::<INPUT>() as i32) };
 }
 
+/// 只补发按下：边角单击接管的按键被拖动后交还给系统，抬起由真实输入完成
+pub fn press(btn: TriggerButton) {
+    let (down, data) = match btn {
+        TriggerButton::Right => (MOUSEEVENTF_RIGHTDOWN, 0),
+        TriggerButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, 0),
+        TriggerButton::X1 => (MOUSEEVENTF_XDOWN, 1),
+        TriggerButton::X2 => (MOUSEEVENTF_XDOWN, 2),
+    };
+    unsafe { SendInput(&[mouse_input(down, data)], size_of::<INPUT>() as i32) };
+}
+
 fn key_input(vk: VIRTUAL_KEY, up: bool) -> INPUT {
     let mut flags = KEYBD_EVENT_FLAGS(0);
     if up {

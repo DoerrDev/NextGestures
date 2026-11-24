@@ -225,6 +225,8 @@ export function App() {
   const triggerChip = (g: Gesture) => {
     const parts: string[] = []
     if (g.trigger) parts.push(TRIGGER_LABEL[g.trigger])
+    if (g.region && g.trigger && g.points.length === 0 && g.wheel.length === 0) parts.push(t('click'))
+    if (g.dwell_ms > 0) parts.push(`${t('dwell')} ${g.dwell_ms}ms`)
     if (g.wheel.length > 0)
       parts.push(`${t('wheel')} ${g.wheel.map((w) => (w === 'Up' ? '↑' : '↓')).join('')}`)
     if (g.left_click) parts.push(t('leftClick'))
@@ -529,7 +531,7 @@ export function App() {
 
                   {editing?.isNew && (
                     <div className="row draft sel">
-                      {editing.gesture.points.length > 0 || editing.gesture.wheel.length > 0 ? (
+                      {editing.gesture.points.length > 0 || editing.gesture.wheel.length > 0 || editing.gesture.region ? (
                         <StrokeCanvas
                           className="rthumb"
                           points={editing.gesture.points}

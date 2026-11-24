@@ -55,7 +55,9 @@ impl AppState {
         if !self.recording.load(Relaxed) {
             hook::set_trigger_mask(cfg.trigger_mask());
             hook::set_region_mask(cfg.region_mask());
+            hook::set_click_mask(cfg.edge_click_mask());
         }
+        hook::set_hover(cfg.has_dwell());
         hook::set_move_threshold(cfg.settings.move_threshold);
         hotkey::set(&cfg.settings.toggle_hotkey);
     }

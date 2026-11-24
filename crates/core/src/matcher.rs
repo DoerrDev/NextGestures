@@ -15,6 +15,8 @@ pub struct Input<'a> {
     pub region: Option<Region>,
     pub wheel: &'a [WheelDir],
     pub left_click: bool,
+    /// 边角停留：只匹配停留手势
+    pub dwell: bool,
     /// 归一化后的轨迹；没有画轨迹时为 None
     pub stroke: Option<&'a [Point]>,
 }
@@ -65,7 +67,7 @@ fn best_of<'a, I: Iterator<Item = &'a Profile>>(
     for p in profiles {
         for g in &p.gestures {
             if !g.enabled || !plugins.allows(&g.action) || g.trigger != input.button || g.wheel != input.wheel
-                || g.left_click != input.left_click {
+                || g.left_click != input.left_click || g.is_dwell() != input.dwell {
                 continue;
             }
             if g.region.is_some() && g.region != input.region {
@@ -103,6 +105,7 @@ mod tests {
             region: None,
             wheel: vec![],
             left_click: false,
+            dwell_ms: 0,
             fire_mode: FireMode::OnRelease,
             points,
             times: vec![],
@@ -111,7 +114,7 @@ mod tests {
     }
 
     fn input(button: TriggerButton, stroke: &[Point]) -> Input<'_> {
-        Input { button: Some(button), region: None, wheel: &[], left_click: false, stroke: Some(stroke) }
+        Input { button: Some(button), region: None, wheel: &[], left_click: false, dwell: false, stroke: Some(stroke) }
     }
 
     fn line(from: Point, to: Point) -> Vec<Point> {
@@ -227,6 +230,38 @@ mod tests {
     }
 
     #[test]
+    fn edge_click_and_dwell_match_only_their_own_input() {
+        let (mut cfg, stroke) = cfg_with_app();
+        let mut click = gesture("top-right-click", vec![]);
+        click.region = Some(Region::Top);
+        let mut dwell = gesture("left-dwell", vec![]);
+        dwell.trigger = None;
+        dwell.region = Some(Region::Left);
+        dwell.dwell_ms = 600;
+        cfg.profile_mut("global").unwrap().gestures.extend([click, dwell]);
+
+        let tap = |region| Input {
+            button: Some(TriggerButton::Right), region, wheel: &[], left_click: false, dwell: false, stroke: None,
+        };
+        assert_eq!(best(&cfg, "x.exe", tap(Some(Region::Top))).unwrap().gesture.id, "top-right-click");
+        assert!(best(&cfg, "x.exe", tap(Some(Region::Bottom))).is_none());
+        assert!(best(&cfg, "x.exe", tap(None)).is_none());
+        // 从边角开始画轨迹仍匹配不限边角的普通手势
+        let drawn = Input { region: Some(Region::Top), ..input(TriggerButton::Right, &stroke) };
+        assert_eq!(best(&cfg, "x.exe", drawn).unwrap().gesture.id, "g-right");
+
+        let stay = |region| Input { button: None, region, wheel: &[], left_click: false, dwell: true, stroke: None };
+        assert_eq!(best(&cfg, "x.exe", stay(Some(Region::Left))).unwrap().gesture.id, "left-dwell");
+        assert!(best(&cfg, "x.exe", stay(Some(Region::Right))).is_none());
+        // 停留手势不会被同区域的无键滚轮输入命中
+        let wheel = Input { dwell: false, wheel: &[WheelDir::Up], ..stay(Some(Region::Left)) };
+        assert!(best(&cfg, "x.exe", wheel).is_none());
+        assert_eq!(cfg.edge_click_mask(), Region::Top.click_bit(TriggerButton::Right));
+        assert_eq!(cfg.region_mask(), 0);
+        assert!(cfg.has_dwell());
+    }
+
+    #[test]
     fn region_specific_wins_and_wheel_must_match() {
         let (mut cfg, stroke) = cfg_with_app();
         let mut g = gesture("g-corner", stroke.clone());
@@ -246,6 +281,7 @@ mod tests {
             region: None,
             wheel: &[WheelDir::Up, WheelDir::Down],
             left_click: false,
+            dwell: false,
             stroke: None,
         };
         assert_eq!(best(&cfg, "explorer.exe", wheel).unwrap().gesture.id, "g-wheel");

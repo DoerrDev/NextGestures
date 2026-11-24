@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU8, AtomicU32, Ordering::Relaxed};
 use std::thread::JoinHandle;
@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use gesture_core::{Region, TriggerButton, WheelDir};
-use windows::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL, MONITORINFO,
     MonitorFromPoint,
@@ -22,8 +22,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// 打在 dwExtraInfo 上，用来识别并放行我们自己合成的输入
 pub const MAGIC: usize = 0x4E47_5354;
 
-/// 屏幕边角判定范围（像素）
-const REGION_SIZE: i32 = 48;
+/// 贴边判定厚度（像素）：鼠标被屏幕边缘挡住时坐标正好落在最外一两个像素
+const EDGE_SIZE: i32 = 3;
+/// 角落沿两条边各延伸的长度（像素），贴着边滑进这段就算角
+const CORNER_SIZE: i32 = 32;
+/// 显示器矩形缓存有效期：鼠标移动频率很高，不必每次都查询显示器
+const MONITOR_CACHE_MS: u64 = 1000;
 /// 无按键手势：滚轮停这么久就算一次手势结束
 const IDLE_MS: u64 = 400;
 /// 会话进行中的空闲检测步长
@@ -53,6 +57,12 @@ pub enum HookEvent {
     Cancel,
     /// 候选态直接松手，需要补发一次真实点击
     PassThroughClick { button: TriggerButton },
+    /// 鼠标进出屏幕边角（配置了停留手势时才回报）
+    EdgeHover { region: Option<Region> },
+    /// 在边角内单击了触发键；未命中手势时需补发真实点击
+    EdgeClick { button: TriggerButton, region: Region },
+    /// 只为边角单击接管的按键被拖动了，补发按下交还给系统
+    PassThroughPress { button: TriggerButton },
     /// 准心拾取结果
     Picked(Option<super::window::WindowInfo>),
     /// 拾取拖动中，当前指向窗口变化
@@ -62,6 +72,8 @@ pub enum HookEvent {
 static TX: OnceLock<Sender<HookEvent>> = OnceLock::new();
 static TRIGGER_MASK: AtomicU8 = AtomicU8::new(0);
 static REGION_MASK: AtomicU8 = AtomicU8::new(0);
+static CLICK_MASK: AtomicU32 = AtomicU32::new(0);
+static HOVER: AtomicBool = AtomicBool::new(false);
 static MOVE_THRESHOLD: AtomicI32 = AtomicI32::new(20);
 static ENABLED: AtomicBool = AtomicBool::new(true);
 static PICKING: AtomicBool = AtomicBool::new(false);
@@ -78,6 +90,16 @@ pub fn set_trigger_mask(mask: u8) {
 /// 允许无按键触发的边角掩码（Region::bit）
 pub fn set_region_mask(mask: u8) {
     REGION_MASK.store(mask, Relaxed);
+}
+
+/// 边角单击掩码（Region::click_bit）
+pub fn set_click_mask(mask: u32) {
+    CLICK_MASK.store(mask, Relaxed);
+}
+
+/// 是否回报鼠标进出边角（停留手势需要）
+pub fn set_hover(on: bool) {
+    HOVER.store(on, Relaxed);
 }
 
 pub fn set_move_threshold(px: i32) {
@@ -183,6 +205,8 @@ struct HookState {
     left_click: bool,
     /// 吞掉按下后，即使会话已经结束也要吞掉对应的抬起。
     swallowed_left_down: bool,
+    /// 鼠标当前所在的边角，变化时回报 EdgeHover
+    hover: Option<Region>,
 }
 
 thread_local! {
@@ -201,8 +225,11 @@ thread_local! {
             last_wheel: None,
             left_click: false,
             swallowed_left_down: false,
+            hover: None,
         })
     };
+    /// 最近一次查询到的显示器矩形与查询时间
+    static MONITOR: Cell<Option<(RECT, Instant)>> = const { Cell::new(None) };
 }
 
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -285,7 +312,9 @@ fn handle(st: &mut HookState, msg: u32, ms: &MSLLHOOKSTRUCT) -> bool {
         ENABLED.load(Relaxed)
             && super::blacklist::active()
             && match button_of(msg, ms) {
-                Some((button, true)) => TRIGGER_MASK.load(Relaxed) & button.bit() != 0,
+                Some((button, true)) => {
+                    TRIGGER_MASK.load(Relaxed) & button.bit() != 0 || CLICK_MASK.load(Relaxed) != 0
+                }
                 _ => msg == WM_MOUSEWHEEL && edge_region(pt).is_some(),
             }
             && super::blacklist::foreground()
@@ -379,6 +408,7 @@ fn handle_with_blacklist(
     }
 
     if msg == WM_MOUSEMOVE {
+        track_hover(st, pt);
         // 边角滚轮手势不记录轨迹
         if st.phase == Phase::Idle || st.button.is_none() || st.left_click {
             return false;
@@ -391,6 +421,15 @@ fn handle_with_blacklist(
             let (dx, dy) = (pt.0 - st.start.0, pt.1 - st.start.1);
             let th = MOVE_THRESHOLD.load(Relaxed);
             if dx * dx + dy * dy >= th * th {
+                // 这个键不是手势触发键，只是为边角单击接管的：拖动就原样交还
+                if let Some(button) = st.button
+                    && st.region.is_some()
+                    && TRIGGER_MASK.load(Relaxed) & button.bit() == 0
+                {
+                    reset(st);
+                    send(HookEvent::PassThroughPress { button });
+                    return false;
+                }
                 st.moved = true;
                 st.phase = Phase::Gesture;
                 send(HookEvent::Start { button: st.button, region: st.region, point: st.start });
@@ -437,10 +476,14 @@ fn handle_with_blacklist(
             send(HookEvent::Cancel);
             return true;
         }
-        if !ENABLED.load(Relaxed) || TRIGGER_MASK.load(Relaxed) & btn.bit() == 0 {
+        if !ENABLED.load(Relaxed) {
             return false;
         }
-        begin(st, Some(btn), None, pt, ms.time);
+        let click_region = edge_click_region(pt, btn);
+        if TRIGGER_MASK.load(Relaxed) & btn.bit() == 0 && click_region.is_none() {
+            return false;
+        }
+        begin(st, Some(btn), click_region, pt, ms.time);
         return true;
     }
 
@@ -449,8 +492,12 @@ fn handle_with_blacklist(
     }
     match st.phase {
         Phase::Candidate => {
+            let region = st.region;
             reset(st);
-            send(HookEvent::PassThroughClick { button: btn });
+            send(match region {
+                Some(region) => HookEvent::EdgeClick { button: btn, region },
+                None => HookEvent::PassThroughClick { button: btn },
+            });
             true
         }
         Phase::Gesture => {
@@ -488,7 +535,7 @@ mod tests {
             bypass_button: None,
             phase: Phase::Idle, button: None, region: None, start: (0, 0),
             moved: false, points: vec![], times: vec![], wheel: vec![], wheel_acc: 0,
-            last_wheel: None, left_click: false, swallowed_left_down: false,
+            last_wheel: None, left_click: false, swallowed_left_down: false, hover: None,
         };
         begin(&mut st, Some(button), None, (0, 0), 0);
         st
@@ -607,6 +654,41 @@ mod tests {
     }
 
     #[test]
+    fn edges_are_thin_and_corners_extend_along_the_edges() {
+        let r = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let at = |x: i32, y: i32| {
+            let (t, b, l, rt) = (y < 3, y >= 1077, x < 3, x >= 1917);
+            classify(&r, (x, y), t, b, l, rt)
+        };
+        assert_eq!(at(960, 0), Some(Region::Top));
+        assert_eq!(at(960, 2), Some(Region::Top));
+        assert_eq!(at(960, 10), None);
+        assert_eq!(at(10, 540), None);
+        assert_eq!(at(0, 540), Some(Region::Left));
+        assert_eq!(at(1919, 1079), Some(Region::BottomRight));
+        assert_eq!(at(20, 0), Some(Region::TopLeft));
+        assert_eq!(at(0, 20), Some(Region::TopLeft));
+        assert_eq!(at(40, 0), Some(Region::Top));
+        assert_eq!(at(1919, 20), Some(Region::TopRight));
+    }
+
+    #[test]
+    fn edge_click_release_and_drag_hand_back_the_button() {
+        // 只为边角单击接管的侧键：原地松开算边角单击并吞掉
+        let up = MSLLHOOKSTRUCT { mouseData: 2 << 16, ..Default::default() };
+        let mut st = state(TriggerButton::X2);
+        st.region = Some(Region::Top);
+        assert!(handle_with_blacklist(&mut st, WM_XBUTTONUP, &up, || false));
+        assert_eq!(st.phase, Phase::Idle);
+        // 拖动超过阈值：交还系统，后续抬起原样放行
+        let mut st = state(TriggerButton::X2);
+        st.region = Some(Region::Top);
+        assert!(!event(&mut st, WM_MOUSEMOVE, 100));
+        assert_eq!(st.phase, Phase::Idle);
+        assert!(!handle_with_blacklist(&mut st, WM_XBUTTONUP, &up, || false));
+    }
+
+    #[test]
     fn click_requires_a_right_button_stroke() {
         let mut st = state(TriggerButton::Right);
         assert!(!event(&mut st, WM_LBUTTONDOWN, 0));
@@ -620,13 +702,43 @@ mod tests {
     }
 }
 
-/// 允许无按键触发的边角
+/// 允许无按键触发的边角；全屏程序里不接管
 fn edge_region(pt: (i32, i32)) -> Option<Region> {
-    region_at(pt).filter(|r| REGION_MASK.load(Relaxed) & r.bit() != 0)
+    region_at(pt)
+        .filter(|r| REGION_MASK.load(Relaxed) & r.bit() != 0)
+        .filter(|_| !super::window::foreground_fullscreen())
 }
 
-/// 鼠标所在显示器的四角四边；与相邻显示器相接的边不算
-fn region_at(pt: (i32, i32)) -> Option<Region> {
+/// 配置了「边角 + 单击 btn」的边角；全屏程序里不接管
+fn edge_click_region(pt: (i32, i32), btn: TriggerButton) -> Option<Region> {
+    let mask = CLICK_MASK.load(Relaxed);
+    if mask == 0 {
+        return None;
+    }
+    region_at(pt)
+        .filter(|r| mask & r.click_bit(btn) != 0)
+        .filter(|_| !super::window::foreground_fullscreen())
+}
+
+/// 鼠标进出边角时回报；按键手势进行中不提示
+fn track_hover(st: &mut HookState, pt: (i32, i32)) {
+    let want = HOVER.load(Relaxed) && ENABLED.load(Relaxed) && st.button.is_none();
+    let region = if want { region_at(pt) } else { None };
+    if region != st.hover {
+        st.hover = region;
+        send(HookEvent::EdgeHover { region });
+    }
+}
+
+/// 鼠标所在显示器矩形，短时间内复用缓存
+fn monitor_rect(pt: (i32, i32)) -> Option<RECT> {
+    let inside = |r: &RECT| pt.0 >= r.left && pt.0 < r.right && pt.1 >= r.top && pt.1 < r.bottom;
+    if let Some((r, at)) = MONITOR.get()
+        && inside(&r)
+        && at.elapsed() < Duration::from_millis(MONITOR_CACHE_MS)
+    {
+        return Some(r);
+    }
     let p = POINT { x: pt.0, y: pt.1 };
     let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
     unsafe {
@@ -635,23 +747,38 @@ fn region_at(pt: (i32, i32)) -> Option<Region> {
             return None;
         }
     }
-    let r = mi.rcMonitor;
+    MONITOR.set(Some((mi.rcMonitor, Instant::now())));
+    Some(mi.rcMonitor)
+}
+
+/// 鼠标所在显示器的四角四边；与相邻显示器相接的边不算
+fn region_at(pt: (i32, i32)) -> Option<Region> {
+    let r = monitor_rect(pt)?;
     let outer = |x: i32, y: i32| unsafe {
         MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONULL).is_invalid()
     };
-    let left = pt.0 < r.left + REGION_SIZE && outer(r.left - 1, pt.1);
-    let right = pt.0 >= r.right - REGION_SIZE && outer(r.right, pt.1);
-    let top = pt.1 < r.top + REGION_SIZE && outer(pt.0, r.top - 1);
-    let bottom = pt.1 >= r.bottom - REGION_SIZE && outer(pt.0, r.bottom);
-    Some(match (top, bottom, left, right) {
-        (true, _, true, _) => Region::TopLeft,
-        (true, _, _, true) => Region::TopRight,
-        (_, true, true, _) => Region::BottomLeft,
-        (_, true, _, true) => Region::BottomRight,
-        (true, ..) => Region::Top,
-        (_, true, ..) => Region::Bottom,
-        (_, _, true, _) => Region::Left,
-        (_, _, _, true) => Region::Right,
+    let left = pt.0 < r.left + EDGE_SIZE && outer(r.left - 1, pt.1);
+    let right = pt.0 >= r.right - EDGE_SIZE && outer(r.right, pt.1);
+    let top = pt.1 < r.top + EDGE_SIZE && outer(pt.0, r.top - 1);
+    let bottom = pt.1 >= r.bottom - EDGE_SIZE && outer(pt.0, r.bottom);
+    classify(&r, pt, top, bottom, left, right)
+}
+
+/// 贴着某条边且离角落不超过 CORNER_SIZE 就算角
+fn classify(r: &RECT, pt: (i32, i32), top: bool, bottom: bool, left: bool, right: bool) -> Option<Region> {
+    let near_left = pt.0 < r.left + CORNER_SIZE;
+    let near_right = pt.0 >= r.right - CORNER_SIZE;
+    let near_top = pt.1 < r.top + CORNER_SIZE;
+    let near_bottom = pt.1 >= r.bottom - CORNER_SIZE;
+    Some(match () {
+        _ if (top && near_left) || (left && near_top) => Region::TopLeft,
+        _ if (top && near_right) || (right && near_top) => Region::TopRight,
+        _ if (bottom && near_left) || (left && near_bottom) => Region::BottomLeft,
+        _ if (bottom && near_right) || (right && near_bottom) => Region::BottomRight,
+        _ if top => Region::Top,
+        _ if bottom => Region::Bottom,
+        _ if left => Region::Left,
+        _ if right => Region::Right,
         _ => return None,
     })
 }

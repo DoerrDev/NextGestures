@@ -46,6 +46,8 @@ export interface Gesture {
   region: Region | null
   wheel: WheelDir[]
   left_click: boolean
+  /** 大于 0 表示边角停留手势：鼠标在 region 停留这么久（ms）后触发 */
+  dwell_ms: number
   fire_mode: FireMode
   points: Point[]
   times: number[]
@@ -224,6 +226,7 @@ export function emptyGesture(trigger: TriggerButton = 'Right'): Gesture {
     region: null,
     wheel: [],
     left_click: false,
+    dwell_ms: 0,
     fire_mode: 'OnRelease',
     points: [],
     times: [],

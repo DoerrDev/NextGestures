@@ -106,6 +106,13 @@ struct Session {
 /// overlay 每帧才重画一次，按 ~250Hz 批量推送观感不变
 const TRAIL_FLUSH: Duration = Duration::from_millis(4);
 
+/// 鼠标停在配置了停留手势的边角，到点执行一次
+struct Hover {
+    region: Region,
+    exe: String,
+    dwell_at: Instant,
+}
+
 /// 待推送给 overlay 的轨迹点。距上次推送已超过 TRAIL_FLUSH 时立即发出（低速移动零额外延迟），
 /// 否则攒着等到点或下一个事件到来再一起发
 struct TrailBuf {
@@ -146,12 +153,23 @@ pub fn spawn(app: AppHandle, rx: Receiver<HookEvent>) {
 fn run(app: AppHandle, rx: Receiver<HookEvent>) {
     let mut session: Option<Session> = None;
     let mut trail = TrailBuf { pts: Vec::new(), last: Instant::now() };
+    let mut hover: Option<Hover> = None;
     loop {
-        let ev = match trail.deadline() {
+        let deadline = match (trail.deadline(), hover.as_ref().map(|h| h.dwell_at)) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let ev = match deadline {
             Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
                 Ok(ev) => ev,
                 Err(RecvTimeoutError::Timeout) => {
-                    trail.flush(&app);
+                    if trail.deadline().is_some_and(|t| t <= Instant::now()) {
+                        trail.flush(&app);
+                    }
+                    if hover.as_ref().is_some_and(|h| h.dwell_at <= Instant::now()) {
+                        // 停留一次只触发一次，离开边角再回来才会重新计时
+                        fire_dwell(&app, hover.take().unwrap());
+                    }
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -167,6 +185,25 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
         }
         match ev {
             HookEvent::PassThroughClick { button } => input::click(button),
+            HookEvent::PassThroughPress { button } => input::press(button),
+            HookEvent::EdgeHover { region } => {
+                hover = region.and_then(|r| enter_edge(&app, r));
+            }
+            HookEvent::EdgeClick { button, region } => {
+                if recording(&app) {
+                    finish_recording(&app, Some(button), Some(region), &[], &[], vec![], false);
+                    continue;
+                }
+                let exe = window::foreground_exe();
+                let hit = lookup(&app, &exe, Some(button), Some(region), &[], false, &[]);
+                match hit {
+                    Some(hit) => {
+                        let _ = overlay::ensure(&app);
+                        fire(&app, &exe, hit, true);
+                    }
+                    None => input::click(button),
+                }
+            }
             HookEvent::Picked(info) => {
                 let _ = app.emit("pick:result", info.map(PickInfo::from));
             }
@@ -343,6 +380,9 @@ fn finish_recording(
     left_click: bool,
 ) {
     stop_recording(app);
+    // 按键手势只在边角单击时带区域，录制的轨迹 / 滚轮不限边角
+    let edge_click = button.is_some() && region.is_some() && points.is_empty() && wheel.is_empty();
+    let region = if button.is_some() && !edge_click { None } else { region };
     let raw: Vec<[i32; 2]> = points.iter().map(|p| [p.0, p.1]).collect();
     let pts = to_points(points);
     let stroke = if pts.is_empty() {
@@ -354,7 +394,7 @@ fn finish_recording(
         })
     };
     match stroke {
-        Some((norm, times)) if !norm.is_empty() || !wheel.is_empty() => {
+        Some((norm, times)) if !norm.is_empty() || !wheel.is_empty() || edge_click => {
             let _ = app.emit(
                 "gesture:recorded",
                 Recorded { trigger: button, region, wheel, left_click, points: norm, times, raw },
@@ -406,7 +446,53 @@ fn to_input<'a>(
     left_click: bool,
     norm: Option<&'a [Point]>,
 ) -> matcher::Input<'a> {
-    matcher::Input { button, region, wheel, left_click, stroke: norm }
+    matcher::Input { button, region, wheel, left_click, dwell: false, stroke: norm }
+}
+
+/// 鼠标进入边角：有停留手势才开始计时；全屏、暂停、黑名单、录制时不触发
+fn enter_edge(app: &AppHandle, region: Region) -> Option<Hover> {
+    if recording(app) || !hook::is_enabled() || window::foreground_fullscreen() {
+        return None;
+    }
+    let exe = window::foreground_exe();
+    let state = app.state::<AppState>();
+    let cfg = state.config.read().unwrap();
+    if cfg.settings.is_blacklisted(&exe) {
+        return None;
+    }
+    let ms = dwell_gesture(&cfg, &exe, region)?.gesture.dwell_ms;
+    Some(Hover { region, exe, dwell_at: Instant::now() + Duration::from_millis(ms as u64) })
+}
+
+fn dwell_gesture<'a>(cfg: &'a gesture_core::Config, exe: &str, region: Region) -> Option<matcher::Matched<'a>> {
+    let input = matcher::Input {
+        button: None,
+        region: Some(region),
+        wheel: &[],
+        left_click: false,
+        dwell: true,
+        stroke: None,
+    };
+    matcher::best(cfg, exe, input)
+}
+
+fn fire_dwell(app: &AppHandle, h: Hover) {
+    let hit = {
+        let state = app.state::<AppState>();
+        let cfg = state.config.read().unwrap();
+        dwell_gesture(&cfg, &h.exe, h.region).map(|m| Hit {
+            profile_id: m.profile_id.to_string(),
+            gesture_id: m.gesture.id.clone(),
+            name: m.gesture.name.clone(),
+            score: m.score,
+            fire_mode: FireMode::Immediate,
+            action: m.gesture.action.clone(),
+        })
+    };
+    if let Some(hit) = hit {
+        let _ = overlay::ensure(app);
+        fire(app, &h.exe, hit, true);
+    }
 }
 
 /// 有轨迹但归一化失败（太短）返回 None

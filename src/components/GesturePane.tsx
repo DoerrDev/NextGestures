@@ -20,6 +20,7 @@ import {
   type Point,
   type Plugins,
   type RecordedPayload,
+  type TriggerButton,
 } from '../api'
 import { t } from '../i18n'
 import { ActionEditor } from './ActionEditor'
@@ -43,6 +44,11 @@ const TRIGGER_LABEL: Record<string, string> = {
   X1: '侧键 1',
   X2: '侧键 2',
 }
+
+/** 选了屏幕边角后的触发方式：滚轮需要录制，单击 / 停留直接配置 */
+type EdgeMode = 'wheel' | 'dwell' | `click:${TriggerButton}`
+
+const DEFAULT_DWELL_MS = 600
 
 export function GesturePane({ initial, plugins, isNew, onSave, onClose, onToggle, onDelete, onDuplicate }: Props) {
   const [draft, setDraft] = useState<Gesture>(initial)
@@ -88,6 +94,7 @@ export function GesturePane({ initial, plugins, isNew, onSave, onClose, onToggle
           region: e.payload.region,
           wheel: e.payload.wheel,
           left_click: e.payload.left_click,
+          dwell_ms: 0,
           fire_mode: e.payload.left_click ? 'OnRelease' : d.fire_mode,
           points: e.payload.points,
           times: e.payload.times,
@@ -119,14 +126,26 @@ export function GesturePane({ initial, plugins, isNew, onSave, onClose, onToggle
   }
 
   const recorded = draft.points.length > 0 || draft.wheel.length > 0
-  const onReleaseOnly = draft.left_click || ['screenshot', 'record_region', 'ai_jyutping', 'ai_translate', 'ai_polish'].includes(draft.action.kind)
+  const edgeMode: EdgeMode = draft.dwell_ms > 0 ? 'dwell' : draft.trigger ? `click:${draft.trigger}` : 'wheel'
+  /** 边角单击 / 停留不需要录制，也没有「画到就执行」的区别 */
+  const edgeNoRecord = !!draft.region && edgeMode !== 'wheel'
+  const onReleaseOnly = draft.left_click || edgeNoRecord || ['screenshot', 'record_region', 'ai_jyutping', 'ai_translate', 'ai_polish'].includes(draft.action.kind)
+
+  const setEdgeMode = (mode: EdgeMode) => {
+    const cleared = { ...draft, wheel: [], points: [], times: [], left_click: false }
+    if (mode === 'wheel') setDraft({ ...draft, trigger: null, dwell_ms: 0 })
+    else if (mode === 'dwell') setDraft({ ...cleared, trigger: null, dwell_ms: draft.dwell_ms || DEFAULT_DWELL_MS })
+    else setDraft({ ...cleared, trigger: mode.slice(6) as TriggerButton, dwell_ms: 0 })
+  }
 
   const submit = () => {
     if (!draft.name.trim()) return setError(t('needName'))
-    if (draft.points.length === 0 && draft.wheel.length === 0) return setError(t('needStroke'))
+    if (!edgeNoRecord && draft.points.length === 0 && draft.wheel.length === 0) return setError(t('needStroke'))
     if (!draft.trigger && !draft.region) return setError(t('needTrigger'))
     if (draft.region && draft.points.length > 0) return setError(t('regionWheelOnly'))
-    onSave({ ...draft, name: draft.name.trim() })
+    if (draft.region && edgeMode === 'dwell' && !(draft.dwell_ms >= 100 && draft.dwell_ms <= 10000))
+      return setError(t('dwellRange'))
+    onSave({ ...draft, name: draft.name.trim(), dwell_ms: draft.region ? draft.dwell_ms : 0 })
   }
 
   return (
@@ -163,14 +182,14 @@ export function GesturePane({ initial, plugins, isNew, onSave, onClose, onToggle
               color="#6fc2ff"
             />
           )}
-          <p className="hint">{recording ? t('recording') : t('recordHint')}</p>
+          <p className="hint">{recording ? t('recording') : edgeNoRecord ? t('edgeNoRecordHint') : t('recordHint')}</p>
           <button type="button" className="btn-outline" onClick={startRecord} disabled={recording || sequenceRecording}>
-            {recorded ? (
+            {recorded || edgeNoRecord ? (
               <RotateCcw size={16} strokeWidth={2} />
             ) : (
               <MousePointerClick size={16} strokeWidth={2} />
             )}
-            {recorded ? t('reRecord') : t('record')}
+            {recorded || edgeNoRecord ? t('reRecord') : t('record')}
           </button>
         </div>
 
@@ -193,10 +212,13 @@ export function GesturePane({ initial, plugins, isNew, onSave, onClose, onToggle
               value={draft.region ? `region:${draft.region}` : draft.trigger ?? ''}
               onChange={(e) => {
                 const v = e.target.value
+                const region = v.startsWith('region:') ? (v.slice(7) as Gesture['region']) : null
                 setDraft(
-                  v.startsWith('region:')
-                    ? { ...draft, trigger: null, region: v.slice(7) as Gesture['region'], left_click: false }
-                    : { ...draft, trigger: v as Gesture['trigger'], region: null, left_click: v === 'Right' && draft.left_click },
+                  region
+                    ? draft.region
+                      ? { ...draft, region } // 换个边角，保留原来的边角动作
+                      : { ...draft, trigger: null, region, left_click: false, dwell_ms: 0 }
+                    : { ...draft, trigger: v as Gesture['trigger'], region: null, dwell_ms: 0, left_click: v === 'Right' && draft.left_click },
                 )
               }}
             >
@@ -230,6 +252,39 @@ export function GesturePane({ initial, plugins, isNew, onSave, onClose, onToggle
             )}
           </div>
         </div>
+
+        {draft.region && (
+          <div className="row field">
+            <div>
+              <label htmlFor="g-edge">{t('edgeMode')}</label>
+              <select id="g-edge" value={edgeMode} onChange={(e) => setEdgeMode(e.target.value as EdgeMode)}>
+                <option value="wheel">{t('edgeWheel')}</option>
+                {TRIGGERS.map((b) => (
+                  <option key={b} value={`click:${b}`}>
+                    {t(`edgeClick${b}`)}
+                  </option>
+                ))}
+                <option value="dwell">{t('edgeDwell')}</option>
+              </select>
+            </div>
+            <div>
+              {edgeMode === 'dwell' && (
+                <>
+                  <label htmlFor="g-dwell">{t('dwellMs')}</label>
+                  <input
+                    id="g-dwell"
+                    type="number"
+                    min={100}
+                    max={10000}
+                    step={50}
+                    value={draft.dwell_ms}
+                    onChange={(e) => setDraft({ ...draft, dwell_ms: Math.round(Number(e.target.value)) || 0 })}
+                  />
+                </>
+              )}
+            </div>
+          </div>
+        )}
 
         <h3 className="pane-sect">{t('action')}</h3>
         <ActionEditor

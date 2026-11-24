@@ -163,6 +163,8 @@ pub fn start_recording(state: State<AppState>) {
     state.recording.store(true, Relaxed);
     hook::set_trigger_mask(0b1111);
     hook::set_region_mask(0xff);
+    // 在任意边角原地单击任意键都录成「边角 + 单击」
+    hook::set_click_mask(u32::MAX);
 }
 
 #[tauri::command]

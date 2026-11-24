@@ -30,6 +30,42 @@ pub struct WindowInfo {
     pub icon: String,
 }
 
+/// 前台窗口是否全屏（视频、游戏、F11 浏览器等）：无标题栏且铺满所在显示器。
+/// 桌面本身也铺满屏幕，需要排除；带标题栏的最大化窗口在任务栏自动隐藏时同样铺满，也排除
+pub fn foreground_fullscreen() -> bool {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONULL, MONITORINFO, MonitorFromWindow};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_STYLE, GetClassNameW, GetShellWindow, GetWindowLongW, GetWindowRect, WS_CAPTION,
+    };
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() || hwnd == GetShellWindow() {
+            return false;
+        }
+        let mut buf = [0u16; 16];
+        let n = GetClassNameW(hwnd, &mut buf) as usize;
+        let class = String::from_utf16_lossy(&buf[..n]);
+        if class == "Progman" || class == "WorkerW" {
+            return false;
+        }
+        if GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_CAPTION.0 == WS_CAPTION.0 {
+            return false;
+        }
+        let mut rc = RECT::default();
+        if GetWindowRect(hwnd, &mut rc).is_err() {
+            return false;
+        }
+        let hm = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL);
+        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if hm.is_invalid() || !GetMonitorInfoW(hm, &mut mi).as_bool() {
+            return false;
+        }
+        let m = mi.rcMonitor;
+        rc.left <= m.left && rc.top <= m.top && rc.right >= m.right && rc.bottom >= m.bottom
+    }
+}
+
 /// 当前前台窗口所属程序的 exe 文件名（小写，例如 `notepad.exe`）
 pub fn foreground_exe() -> String {
     let hwnd = unsafe { GetForegroundWindow() };
