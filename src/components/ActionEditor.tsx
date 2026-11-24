@@ -21,11 +21,11 @@ const PLUGIN_FOR_ACTION: Partial<Record<Action['kind'], 'screenshot' | 'recorder
   ai_polish: 'quickformater',
 }
 
-type EditorKind = Exclude<Action['kind'], 'launch_app'>
+type EditorKind = Exclude<Action['kind'], 'command'>
 
 const KIND_LABEL: Record<EditorKind, Key> = {
   none: 'actionNone',
-  command: 'actionCommand',
+  launch_app: 'actionLaunchApp',
   hotkey: 'actionHotkey',
   key_sequence: 'actionKeySequence',
   open_url: 'actionOpenUrl',
@@ -46,8 +46,8 @@ function blank(kind: EditorKind): Action {
     case 'ai_translate':
     case 'ai_polish':
       return { kind }
-    case 'command':
-      return { kind, program: '', args: [], shell: false }
+    case 'launch_app':
+      return { kind, app_id: '', name: '' }
     case 'hotkey':
       return { kind, keys: [] }
     case 'key_sequence':
@@ -62,7 +62,6 @@ function blank(kind: EditorKind): Action {
 export function ActionEditor({ action, plugins, onChange, onError, onRecordingChange }: Props) {
   const currentPlugin = PLUGIN_FOR_ACTION[action.kind]
   const isDisabled = currentPlugin !== undefined && !plugins[currentPlugin]
-  const editorKind = action.kind === 'launch_app' ? 'command' : action.kind
 
   const test = async () => {
     try {
@@ -78,9 +77,12 @@ export function ActionEditor({ action, plugins, onChange, onError, onRecordingCh
         <label htmlFor="action-kind">{t('actionKind')}</label>
         <select
           id="action-kind"
-          value={editorKind}
+          value={action.kind}
           onChange={(e) => onChange(blank(e.target.value as EditorKind))}
         >
+          {action.kind === 'command' && (
+            <option value="command" disabled>{t('legacyCommand')}</option>
+          )}
           {KINDS.map((kind) => {
             const plugin = PLUGIN_FOR_ACTION[kind]
             const disabled = plugin !== undefined && !plugins[plugin]
@@ -104,46 +106,14 @@ export function ActionEditor({ action, plugins, onChange, onError, onRecordingCh
         <p className="field-note">{t('aiActionHint')}</p>
       )}
 
-      {editorKind === 'command' && (
+      {action.kind === 'command' && <p className="field-note">{t('legacyCommandHint')}</p>}
+      {(action.kind === 'launch_app' || action.kind === 'command') && (
         <ProgramPicker
-          selected={action.kind === 'launch_app' ? action.name : undefined}
+          selected={action.kind === 'launch_app' && action.app_id
+            ? { id: action.app_id, name: action.name }
+            : undefined}
           onSelect={(app) => onChange({ kind: 'launch_app', app_id: app.id, name: app.name })}
-          onManual={() => onChange(blank('command'))}
         />
-      )}
-
-      {action.kind === 'command' && (
-        <>
-          <div className="field">
-            <label htmlFor="action-program">{t('program')}</label>
-            <input
-              id="action-program"
-              type="text"
-              value={action.program}
-              placeholder="notepad.exe"
-              onChange={(e) => onChange({ ...action, program: e.target.value })}
-            />
-          </div>
-          <div className="field">
-            <label htmlFor="action-args">{t('args')}</label>
-            <input
-              id="action-args"
-              type="text"
-              value={action.args.join(' ')}
-              onChange={(e) =>
-                onChange({ ...action, args: e.target.value.split(' ').filter(Boolean) })
-              }
-            />
-          </div>
-          <label className="check field">
-            <input
-              type="checkbox"
-              checked={action.shell}
-              onChange={(e) => onChange({ ...action, shell: e.target.checked })}
-            />
-            {t('shell')}
-          </label>
-        </>
       )}
 
       {action.kind === 'hotkey' && (
@@ -179,7 +149,8 @@ export function ActionEditor({ action, plugins, onChange, onError, onRecordingCh
       )}
 
       {action.kind !== 'none' && action.kind !== 'key_sequence' && currentPlugin === undefined && (
-        <button type="button" className="btn-outline subtle" onClick={test}>
+        <button type="button" className="btn-outline subtle" onClick={test}
+          disabled={action.kind === 'launch_app' && !action.app_id}>
           <Play size={16} strokeWidth={2} />
           {t('test')}
         </button>
@@ -193,7 +164,7 @@ export function describeAction(action: Action): string {
     case 'command':
       return `${action.program} ${action.args.join(' ')}`.trim()
     case 'launch_app':
-      return action.name
+      return action.name || t('actionLaunchApp')
     case 'hotkey':
       return action.keys.join('+')
     case 'key_sequence':

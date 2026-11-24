@@ -183,8 +183,16 @@ fn extract_icon(path: &str) -> Option<String> {
     if ok == 0 || info.hIcon.is_invalid() {
         return None;
     }
-    let png = png_from_icon(info.hIcon);
-    unsafe { DestroyIcon(info.hIcon) }.ok();
+    owned_icon_data_url(info.hIcon)
+}
+
+/// Convert a caller-owned Shell icon and release its native handle.
+pub(super) fn owned_icon_data_url(icon: windows::Win32::UI::WindowsAndMessaging::HICON) -> Option<String> {
+    if icon.is_invalid() {
+        return None;
+    }
+    let png = png_from_icon(icon);
+    let _ = unsafe { DestroyIcon(icon) };
     png.map(|bytes| format!("data:image/png;base64,{}", base64_encode(&bytes)))
 }
 

@@ -140,6 +140,7 @@ export function GesturePane({ initial, plugins, isNew, onSave, onClose, onToggle
 
   const submit = () => {
     if (!draft.name.trim()) return setError(t('needName'))
+    if (draft.action.kind === 'launch_app' && !draft.action.app_id) return setError(t('needInstalledApp'))
     if (!edgeNoRecord && draft.points.length === 0 && draft.wheel.length === 0) return setError(t('needStroke'))
     if (!draft.trigger && !draft.region) return setError(t('needTrigger'))
     if (draft.region && draft.points.length > 0) return setError(t('regionWheelOnly'))

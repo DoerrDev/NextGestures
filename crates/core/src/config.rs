@@ -475,6 +475,9 @@ impl Config {
 
     /// 覆盖式写入：存在同 id 则更新，否则追加
     pub fn upsert_gesture(&mut self, profile_id: &str, gesture: Gesture) -> Result<()> {
+        if let Action::LaunchApp { app_id, .. } = &gesture.action {
+            anyhow::ensure!(!app_id.trim().is_empty(), "请先选择要启动的程序");
+        }
         anyhow::ensure!(
             !gesture.left_click || (gesture.trigger == Some(TriggerButton::Right) && !gesture.points.is_empty()),
             "终点左键点击需要右键轨迹"

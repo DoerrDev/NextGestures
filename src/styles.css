@@ -294,38 +294,122 @@ textarea {
 }
 
 .program-selection {
-  margin: 0 0 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
   overflow-wrap: anywhere;
 }
 
-.program-picker-buttons {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
+.program-selection-label {
+  display: block;
+  color: var(--color-pencil-gray);
+  font-size: var(--text-caption);
 }
 
-.program-picker-panel {
-  display: grid;
-  gap: 8px;
-  margin-top: 8px;
+.program-dialog {
+  width: min(680px, calc(100% - 48px));
+  height: min(600px, calc(100% - 48px));
+  margin: auto;
+  padding: 0;
+  color: var(--color-charcoal-ink);
+}
+
+.program-dialog::backdrop {
+  background: rgba(56, 56, 56, 0.42);
+}
+
+.program-dialog .dialog-head,
+.program-dialog .dialog-foot {
+  flex-shrink: 0;
+}
+
+.program-dialog .dialog-head h2 {
+  margin: 0;
+  font-size: var(--text-subheading);
+}
+
+.program-dialog-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: hidden;
+  padding: 16px 24px;
 }
 
 .program-picker-list {
+  min-height: 0;
   list-style: none;
-  max-height: 176px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   margin: 0;
   padding: 4px;
   border: 1px solid var(--color-charcoal-ink);
   border-radius: var(--radius-sm);
 }
 
-.program-picker-list button {
+.program-row {
   width: 100%;
-  justify-content: flex-start;
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  color: inherit;
+  font: inherit;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
   text-align: left;
+  cursor: pointer;
+}
+
+.program-row:hover {
+  background: var(--color-chalk-gray);
+}
+
+.program-row[aria-pressed='true'],
+.program-row:focus-visible {
+  border-color: var(--color-sky-crayon);
+  outline: none;
+}
+
+.program-row[aria-pressed='true'] {
+  background: var(--color-ice-wash);
+}
+
+.program-row-details {
+  display: grid;
+  gap: 2px;
   overflow-wrap: anywhere;
+}
+
+.program-icon {
+  display: grid;
+  flex: 0 0 32px;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+}
+
+.program-icon img {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+}
+
+.program-icon svg {
+  width: 22px;
+  height: 22px;
+  color: var(--color-pencil-gray);
+}
+
+.program-path {
+  color: #626262;
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .row {

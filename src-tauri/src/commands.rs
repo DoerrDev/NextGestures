@@ -28,6 +28,8 @@ pub struct VirtualScreenSize {
 pub struct InstalledApp {
     id: String,
     name: String,
+    path: String,
+    icon: Option<String>,
 }
 
 #[tauri::command]
@@ -35,7 +37,12 @@ pub async fn list_installed_apps() -> R<Vec<InstalledApp>> {
     tauri::async_runtime::spawn_blocking(|| {
         shell::installed_apps().map(|apps| {
             apps.into_iter()
-                .map(|app| InstalledApp { id: app.id, name: app.name })
+                .map(|app| InstalledApp {
+                    id: app.id,
+                    name: app.name,
+                    path: app.path,
+                    icon: app.icon,
+                })
                 .collect()
         })
     })

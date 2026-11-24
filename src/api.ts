@@ -174,6 +174,8 @@ export const api = {
 export interface InstalledApp {
   id: string
   name: string
+  path: string
+  icon: string | null
 }
 
 export interface ChatItem {
