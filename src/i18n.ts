@@ -78,7 +78,6 @@ const zhCN = {
   actionHotkey: '快捷键',
   actionKeySequence: '快捷键序列',
   actionOpenUrl: '打开网址',
-  actionLua: 'Lua 脚本',
   url: '网址',
   urlHint: '{selection} 会替换成当前选中的文字（自动模拟 Ctrl+C 取词并还原剪贴板）',
   program: '程序或命令',
@@ -90,9 +89,6 @@ const zhCN = {
   noKeys: '尚未录制',
   clearKeys: '清除',
   steps: '每行一组组合键',
-  luaCode: 'Lua 代码',
-  luaHint:
-    '可用：ng.send_keys("ctrl+w") / ng.run(prog, args) / ng.selection() / ng.url_encode(text) / ng.cursor() / ng.exe() / ng.sleep(ms)',
   test: '测试',
   save: '保存',
   cancel: '取消',

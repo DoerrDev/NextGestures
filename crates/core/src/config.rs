@@ -65,6 +65,8 @@ pub enum FireMode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
+    /// 已移除的 lua 动作读旧配置时降级为 None
+    #[serde(alias = "lua")]
     None,
     #[serde(alias = "pin_screenshot")]
     Screenshot,
@@ -87,7 +89,6 @@ pub enum Action {
     KeySequence { steps: Vec<Vec<String>> },
     /// 用默认浏览器打开链接，`{selection}` 会替换成当前选中的文字
     OpenUrl { url: String },
-    Lua { code: String },
 }
 
 impl Default for Action {
@@ -582,6 +583,18 @@ mod tests {
         g.trigger = Some(TriggerButton::Right);
         g.points.clear();
         assert!(cfg.upsert_gesture("global", g).is_err());
+    }
+
+    #[test]
+    fn removed_lua_action_degrades_to_none() {
+        let mut cfg = config_with_gestures();
+        cfg.profiles[0].gestures[0].action = Action::OpenUrl { url: "x".into() };
+        let text = toml::to_string(&cfg).unwrap()
+            .replace("kind = \"open_url\"\nurl = \"x\"", "kind = \"lua\"\ncode = \"ng.sleep(1)\"");
+        assert!(text.contains("kind = \"lua\""));
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.profiles[0].gestures[0].action, Action::None);
+        assert_eq!(back.profiles[0].gestures.len(), 2);
     }
 
     #[test]

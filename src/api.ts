@@ -25,7 +25,6 @@ export type Action =
   | { kind: 'hotkey'; keys: string[] }
   | { kind: 'key_sequence'; steps: string[][] }
   | { kind: 'open_url'; url: string }
-  | { kind: 'lua'; code: string }
 
 export interface Gesture {
   id: string

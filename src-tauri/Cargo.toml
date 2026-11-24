@@ -19,7 +19,6 @@ anyhow = { workspace = true }
 crossbeam-channel = { workspace = true }
 log = { workspace = true }
 env_logger = "0.11"
-mlua = { version = "0.11", features = ["lua54", "vendored"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 sha2 = "0.10"
 

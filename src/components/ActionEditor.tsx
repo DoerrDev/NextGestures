@@ -24,7 +24,6 @@ const KIND_LABEL: Record<Action['kind'], Key> = {
   hotkey: 'actionHotkey',
   key_sequence: 'actionKeySequence',
   open_url: 'actionOpenUrl',
-  lua: 'actionLua',
   screenshot: 'actionScreenshot',
   record_region: 'actionRecordRegion',
   ai_jyutping: 'actionAiJyutping',
@@ -33,21 +32,6 @@ const KIND_LABEL: Record<Action['kind'], Key> = {
 }
 
 const KINDS = Object.keys(KIND_LABEL) as Action['kind'][]
-
-const LUA_TEMPLATE = `-- ng.send_keys("ctrl+w")        发送组合键
--- ng.run(prog, {arg1, arg2})   启动进程（不显示控制台）
--- ng.selection()               取当前选中文字（模拟 Ctrl+C，自动还原剪贴板）
--- ng.url_encode(text)          URL 编码
--- ng.cursor()                  返回鼠标坐标 x, y
--- ng.exe()                     返回前台窗口进程名
--- ng.sleep(ms)                 等待毫秒（最多 10000）
-
--- 示例：用选中文字搜索，等页面打开后切到上一个标签
-local q = ng.url_encode(ng.selection())
-ng.run("cmd", {"/C", "start", "", "https://www.google.com/search?q=" .. q})
-ng.sleep(2500)
-ng.send_keys("alt+tab")
-`
 
 function blank(kind: Action['kind']): Action {
   switch (kind) {
@@ -65,8 +49,6 @@ function blank(kind: Action['kind']): Action {
       return { kind, steps: [] }
     case 'open_url':
       return { kind, url: 'https://www.google.com/search?q={selection}' }
-    case 'lua':
-      return { kind, code: LUA_TEMPLATE }
     default:
       return { kind: 'none' }
   }
@@ -199,21 +181,6 @@ export function ActionEditor({ action, plugins, onChange, onError }: Props) {
         </div>
       )}
 
-      {action.kind === 'lua' && (
-        <div className="field">
-          <label htmlFor="action-lua">{t('luaCode')}</label>
-          <textarea
-            id="action-lua"
-            rows={14}
-            value={action.code}
-            onChange={(e) => onChange({ ...action, code: e.target.value })}
-          />
-          <p className="card-desc" style={{ whiteSpace: 'normal', marginTop: 6 }}>
-            {t('luaHint')}
-          </p>
-        </div>
-      )}
-
       {action.kind !== 'none' && currentPlugin === undefined && (
         <button type="button" className="btn-outline subtle" onClick={test}>
           <Play size={16} strokeWidth={2} />
@@ -234,8 +201,6 @@ export function describeAction(action: Action): string {
       return action.steps.map((s) => s.join('+')).join(' → ')
     case 'open_url':
       return action.url
-    case 'lua':
-      return action.code.split('\n')[0] ?? 'lua'
     default:
       return t(KIND_LABEL[action.kind])
   }
