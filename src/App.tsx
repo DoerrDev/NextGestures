@@ -59,6 +59,7 @@ export function App() {
   const [toast, setToast] = useState('')
   const [confirmRemove, setConfirmRemove] = useState<Profile | null>(null)
   const [menuId, setMenuId] = useState('')
+  const [menuPos, setMenuPos] = useState({ x: 0, y: 0 })
   const [update, setUpdate] = useState<Update | null>(null)
   const [versionOpen, setVersionOpen] = useState(false)
   const [updateStatus, setUpdateStatus] = useState<'checking' | 'checked' | 'failed'>('checking')
@@ -197,10 +198,15 @@ export function App() {
       setActiveId(profile.id)
     })
 
-  const saveSettings = (settings: Settings) =>
+  const saveSettings = (settings: Settings, bindId?: string) =>
     void guard(async () => {
       await api.saveSettings(settings)
       setSettingsOpen(false)
+      const action = settings.ai.actions?.find(a => a.id === bindId)
+      if (action) {
+        if (activePassthrough) setActiveId('global')
+        setEditing({ gesture: { ...emptyGesture(), name: action.name, action: { kind: 'ai_custom', id: action.id } }, isNew: true })
+      }
       flash(t('saved'))
     })
 
@@ -304,6 +310,8 @@ export function App() {
                       title={t('more')}
                       onClick={(e) => {
                         e.stopPropagation()
+                        const r = e.currentTarget.getBoundingClientRect()
+                        setMenuPos({ x: r.right + 10, y: Math.max(8, Math.min(r.top, window.innerHeight - 140)) })
                         setMenuId(menuId === p.id ? '' : p.id)
                       }}
                     >
@@ -318,7 +326,7 @@ export function App() {
                             setMenuId('')
                           }}
                         />
-                        <div className="prof-menu" onClick={(e) => e.stopPropagation()}>
+                        <div className="prof-menu" style={{ left: menuPos.x, top: menuPos.y }} onClick={(e) => e.stopPropagation()}>
                           {([false, true] as const).map((pass) => (
                             <button
                               key={String(pass)}
@@ -442,7 +450,7 @@ export function App() {
                         {!g.enabled && <span className="tag mute">{t('disabled')}</span>}
                       </div>
                       <div className={g.action.kind === 'open_url' ? 'rdesc url' : 'rdesc'}>
-                        {describeAction(g.action)}
+                        {describeAction(g.action, config.settings.ai.actions ?? [])}
                       </div>
                       <div className="racts">
                         <button
@@ -507,7 +515,7 @@ export function App() {
                         <span className="tag warn">{t('draftFlag')}</span>
                         {hotkeyTag(editing.gesture)}
                       </div>
-                      <div className="rdesc">{describeAction(editing.gesture.action) || '—'}</div>
+                      <div className="rdesc">{describeAction(editing.gesture.action, config.settings.ai.actions ?? []) || '—'}</div>
                       <div className="racts" />
                     </div>
                   )}
@@ -525,6 +533,7 @@ export function App() {
               {editing ? (
                 <GesturePane
                   key={`${editing.isNew ? 'new' : 'edit'}:${editing.gesture.id}`}
+                  aiActions={config.settings.ai.actions ?? []}
                   initial={editing.gesture}
                   isNew={editing.isNew}
                   onSave={saveGesture}
@@ -561,6 +570,7 @@ export function App() {
       )}
       {settingsOpen && (
         <SettingsDialog
+          profiles={config.profiles}
           initial={config.settings}
           unread={unread}
           configPath={configPath}

@@ -236,9 +236,7 @@ button {
 }
 
 .prof-menu {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 4px);
+  position: fixed;
   z-index: 21;
   min-width: 190px;
   background: var(--color-frost-white);
@@ -1999,3 +1997,11 @@ select.chip-select option {
   flex: none;
   white-space: nowrap;
 }
+
+.ai-actions { display: grid; gap: 10px; border-top: 1px solid var(--border, #ddd); padding-top: 12px; }
+.ai-actions h3 { margin: 0; font-size: 15px; }
+.ai-actions .row { justify-content: space-between; align-items: center; }
+.ai-actions .field { display: grid; gap: 4px; margin: 0; }
+.ai-actions textarea, .ai-actions select { width: 100%; font: inherit; }
+.ai-actions textarea { resize: vertical; padding: 8px; }
+.ai-actions pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow: auto; font: inherit; }
