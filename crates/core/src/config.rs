@@ -317,8 +317,16 @@ impl std::fmt::Debug for AiSettings {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Shortcut {
+    pub keys: Vec<String>,
+    pub action: Action,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shortcuts: Vec<Shortcut>,
     #[serde(default = "version")]
     pub version: u32,
     #[serde(default)]
@@ -330,6 +338,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            shortcuts: Vec::new(),
             version: version(),
             settings: Settings::default(),
             profiles: vec![Profile {
@@ -556,6 +565,18 @@ fn arc(center: Point, r: f32, from_deg: f32, to_deg: f32, n: usize) -> Vec<Point
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_shortcuts_roundtrip_and_default_for_older_configs() {
+        assert!(Config::parse("version = 1").unwrap().shortcuts.is_empty());
+        let mut config = Config::default();
+        config.shortcuts.push(Shortcut {
+            keys: vec!["ctrl".into(), "alt".into(), "s".into()],
+            action: Action::Screenshot,
+        });
+        let serialized = toml::to_string(&config).unwrap();
+        assert_eq!(Config::parse(&serialized).unwrap().shortcuts, config.shortcuts);
+    }
 
     fn config_with_gestures() -> Config {
         let mut cfg = Config::default();

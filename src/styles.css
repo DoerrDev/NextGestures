@@ -1353,6 +1353,46 @@ textarea {
   flex-direction: column;
 }
 
+.shortcut-body {
+  overflow-y: auto;
+}
+
+.shortcut-editor {
+  min-width: 0;
+  margin: 16px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.shortcut-field {
+  min-width: 0;
+  margin-inline: 0;
+  padding: 0;
+  border: 0;
+}
+
+.shortcut-list {
+  display: grid;
+  gap: 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.shortcut-list li {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.shortcut-list li > span:nth-child(2) {
+  overflow-wrap: anywhere;
+}
+
+.shortcut-error {
+  color: #a92323;
+}
+
 .dialog.narrow {
   max-width: 460px;
 }

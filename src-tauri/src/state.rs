@@ -3,7 +3,7 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::time::SystemTime;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use gesture_core::Config;
 use gesture_platform::{hook, hotkey};
 
@@ -41,9 +41,15 @@ impl AppState {
         if current == *self.mtime.read().unwrap() {
             return Ok(false);
         }
+        let mut config = self.config.write().unwrap();
+        if current != mtime_of(&self.path) || current == *self.mtime.read().unwrap() {
+            return Ok(false);
+        }
         let fresh = Config::load(&self.path)?;
-        *self.config.write().unwrap() = fresh;
+        hotkey::set(shortcut_bindings(&fresh, false)?, false)?;
+        *config = fresh;
         *self.mtime.write().unwrap() = current;
+        drop(config);
         self.push_to_hook();
         Ok(true)
     }
@@ -59,8 +65,72 @@ impl AppState {
         }
         hook::set_hover(cfg.has_dwell());
         hook::set_move_threshold(cfg.settings.move_threshold);
-        hotkey::set(&cfg.settings.toggle_hotkey);
     }
+
+    pub fn init_shortcuts(&self) -> Result<()> {
+        let config = self.config.read().unwrap();
+        hotkey::set(shortcut_bindings(&config, false)?, false)
+    }
+
+    pub fn update_shortcuts(&self, update: impl FnOnce(&mut Config)) -> Result<()> {
+        let mut config = self.config.write().unwrap();
+        let mut next = config.clone();
+        update(&mut next);
+        let changed = next.shortcuts != config.shortcuts
+            || next.settings.toggle_hotkey != config.settings.toggle_hotkey;
+        if changed {
+            hotkey::set(shortcut_bindings(&next, true)?, true)?;
+        }
+        if let Err(error) = next.save(&self.path) {
+            if changed {
+                let restore =
+                    shortcut_bindings(&config, false).and_then(|old| hotkey::set(old, false));
+                if let Err(restore_error) = restore {
+                    log::warn!("恢复快捷键失败: {restore_error:#}");
+                }
+            }
+            return Err(error);
+        }
+        *self.mtime.write().unwrap() = mtime_of(&self.path);
+        *config = next;
+        drop(config);
+        self.push_to_hook();
+        Ok(())
+    }
+}
+
+fn shortcut_bindings(config: &Config, strict: bool) -> Result<Vec<hotkey::Binding>> {
+    let mut bindings = Vec::new();
+    let toggle = &config.settings.toggle_hotkey;
+    let entries = (!toggle.is_empty())
+        .then_some((toggle, true))
+        .into_iter()
+        .chain(
+            config
+                .shortcuts
+                .iter()
+                .map(|shortcut| (&shortcut.keys, false)),
+        );
+    for (keys, is_toggle) in entries {
+        let label = keys.join(" + ");
+        let parsed = (|| {
+            let chord = hotkey::Chord::parse(keys)?;
+            if !is_toggle && chord.is_unmodified() {
+                bail!("请同时按住 Ctrl、Alt、Shift 或 Win 中的至少一个修饰键");
+            }
+            if bindings.iter().any(|(other, _)| *other == chord) {
+                bail!("组合键已被 NextGestures 中的另一项绑定使用");
+            }
+            Ok(chord)
+        })()
+        .with_context(|| format!("快捷键 [{label}]"));
+        match parsed {
+            Ok(chord) => bindings.push((chord, label)),
+            Err(error) if strict => bail!("{error:#}"),
+            Err(error) => log::warn!("{error:#}"),
+        }
+    }
+    Ok(bindings)
 }
 
 fn mtime_of(path: &std::path::Path) -> Option<SystemTime> {

@@ -103,7 +103,8 @@ export function ActionEditor({ action, onChange, onError, onRecordingChange }: P
       {action.kind === 'hotkey' && (
         <div className="field">
           <label>{t('keys')}</label>
-          <HotkeyRecorder keys={action.keys} onChange={(keys) => onChange({ ...action, keys })} />
+          <HotkeyRecorder keys={action.keys} onChange={(keys) => onChange({ ...action, keys })}
+            onRecordingChange={onRecordingChange} />
         </div>
       )}
 

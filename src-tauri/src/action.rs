@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use gesture_core::Action;
-use gesture_platform::{clipboard, input, shell};
+use gesture_platform::{clipboard, hotkey, input, shell, window};
 use tauri::{AppHandle, Manager};
 
 use crate::state::AppState;
@@ -13,7 +13,21 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// 动作可能阻塞（起进程 / 取选中文字），单独开线程执行
 pub fn spawn(app: AppHandle, action: Action) {
+    spawn_internal(app, action, None);
+}
+
+pub fn spawn_from_shortcut(app: AppHandle, action: Action, chord: hotkey::Chord) {
+    spawn_internal(app, action, Some(chord));
+}
+
+fn spawn_internal(app: AppHandle, action: Action, chord: Option<hotkey::Chord>) {
+    let foreground = chord.map(|_| window::foreground_hwnd());
     std::thread::spawn(move || {
+        if let Some(chord) = chord
+            && (!chord.wait_for_release() || foreground != Some(window::foreground_hwnd()))
+        {
+            return;
+        }
         if let Err(e) = run(&app, &action) {
             log::error!("执行动作失败: {e:#}");
             // The AI worker handles errors after it starts. This covers launch and URL errors.

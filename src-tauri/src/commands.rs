@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering::Relaxed;
 
-use gesture_core::{Action, Config, Gesture, KeySequenceEvent, Profile, Settings};
+use gesture_core::{Action, Config, Gesture, KeySequenceEvent, Profile, Settings, Shortcut};
 use gesture_platform::keyrec::{self, KeyRecEvent};
 use gesture_platform::{hook, shell, window};
 use serde::{Deserialize, Serialize};
@@ -72,16 +72,22 @@ pub fn config_path(state: State<AppState>) -> String {
 
 #[tauri::command]
 pub fn save_settings(app: AppHandle, state: State<AppState>, mut settings: Settings) -> R<()> {
-    {
-        let mut cfg = state.config.write().unwrap();
+    state.update_shortcuts(|cfg| {
         // 黑名单独立即时保存，避免旧设置快照把名单覆盖回去。
         settings.blacklist = cfg.settings.blacklist.clone();
         cfg.settings = settings;
-    }
-    commit(&app)?;
+    }).map_err(err)?;
     // 「触发提示置顶」立即生效，不必等下一次手势
     let _ = crate::overlay::apply_z_order(&app);
     Ok(())
+}
+
+#[tauri::command]
+pub fn save_shortcuts(state: State<AppState>, shortcuts: Vec<Shortcut>) -> R<()> {
+    if shortcuts.iter().any(|shortcut| matches!(shortcut.action, Action::None)) {
+        return Err("请为每个快捷键选择一个动作".into());
+    }
+    state.update_shortcuts(|cfg| cfg.shortcuts = shortcuts).map_err(err)
 }
 
 #[tauri::command]

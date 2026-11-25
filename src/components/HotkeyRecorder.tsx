@@ -7,22 +7,26 @@ import { t } from '../i18n'
 interface Props {
   keys: string[]
   onChange: (keys: string[]) => void
+  onRecordingChange?: (recording: boolean) => void
 }
 
 const CHIPS = ['ctrl', 'alt', 'shift', 'win']
 
-export function HotkeyRecorder({ keys, onChange }: Props) {
+export function HotkeyRecorder({ keys, onChange, onRecordingChange }: Props) {
   const [recording, setRecording] = useState(false)
   const [mods, setMods] = useState<string[]>([])
   // 父组件每次渲染都会传新的 onChange，不能让它重启原生录制
   const onChangeRef = useRef(onChange)
   onChangeRef.current = onChange
+  const onRecordingChangeRef = useRef(onRecordingChange)
+  onRecordingChangeRef.current = onRecordingChange
 
   // 按键由后端的低级键盘钩子截获：它先于系统和其它软件的热键执行，
   // 所以 Win+方向键、被别的程序占用的 F1 等都能录到，且录制时不会触发它们
   useEffect(() => {
     if (!recording) return
 
+    onRecordingChangeRef.current?.(true)
     let alive = true
     const listeners = Promise.all([
       listen<string[]>('hotkey:mods', (e) => setMods(e.payload)),
@@ -40,6 +44,7 @@ export function HotkeyRecorder({ keys, onChange }: Props) {
     window.addEventListener('blur', stop)
     return () => {
       alive = false
+      onRecordingChangeRef.current?.(false)
       window.removeEventListener('blur', stop)
       void listeners.then((fns) => fns.forEach((off) => off()))
       void api.cancelKeyRecording()

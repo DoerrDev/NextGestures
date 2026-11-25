@@ -88,6 +88,7 @@ fn key_input(vk: VIRTUAL_KEY, up: bool) -> INPUT {
 
 /// 组合键：按顺序按下，逆序释放
 pub fn send_hotkey(keys: &[String]) -> Result<()> {
+    let _guard = super::hotkey::suppress_during_replay();
     if keys.is_empty() {
         bail!("快捷键为空");
     }
@@ -106,6 +107,7 @@ pub fn send_hotkey(keys: &[String]) -> Result<()> {
 }
 
 pub fn replay_sequence(events: &[KeySequenceEvent]) -> Result<()> {
+    let _guard = super::hotkey::suppress_during_replay();
     use std::time::{Duration, Instant};
 
     static PLAYING: std::sync::Mutex<()> = std::sync::Mutex::new(());

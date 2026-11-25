@@ -67,6 +67,10 @@ pub fn foreground_fullscreen() -> bool {
 }
 
 /// 当前前台窗口所属程序的 exe 文件名（小写，例如 `notepad.exe`）
+pub fn foreground_hwnd() -> usize {
+    unsafe { GetForegroundWindow() }.0 as usize
+}
+
 pub fn foreground_exe() -> String {
     let hwnd = unsafe { GetForegroundWindow() };
     exe_of_hwnd(hwnd)

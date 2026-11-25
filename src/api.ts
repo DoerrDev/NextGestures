@@ -85,7 +85,13 @@ export interface Settings {
   ai: AiSettings
 }
 
+export interface Shortcut {
+  keys: string[]
+  action: Action
+}
+
 export interface Config {
+  shortcuts?: Shortcut[]
   version: number
   settings: Settings
   profiles: Profile[]
@@ -127,6 +133,7 @@ export interface FiredPayload {
 export const api = {
   getConfig: () => invoke<Config>('get_config'),
   configPath: () => invoke<string>('config_path'),
+  saveShortcuts: (shortcuts: Shortcut[]) => invoke<void>('save_shortcuts', { shortcuts }),
   saveSettings: (settings: Settings) => invoke<void>('save_settings', { settings }),
   saveBlacklist: (names: string[]) => invoke<void>('save_blacklist', { names }),
   upsertGesture: (profileId: string, gesture: Gesture) =>

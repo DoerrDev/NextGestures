@@ -56,6 +56,7 @@ fn main() {
             commands::config_path,
             commands::save_settings,
             commands::save_blacklist,
+            commands::save_shortcuts,
             commands::upsert_gesture,
             commands::remove_gesture,
             commands::set_gesture_enabled,
@@ -93,7 +94,8 @@ fn main() {
             app.manage(feedback::Backend::new(app.package_info().version.to_string()));
             feedback::start(app.handle());
             let handle = app.handle().clone();
-            hotkey::start(move || set_enabled(&handle, !hook::is_enabled()));
+            hotkey::start(move |chord| dispatch_shortcut(&handle, chord));
+            app.state::<AppState>().init_shortcuts()?;
             Ok(())
         })
         .on_window_event(|win, event| {
@@ -131,6 +133,27 @@ fn size_main_window(app: &AppHandle) {
     let size = tauri::LogicalSize::new((screen.width * 0.65).max(880.0), (screen.height * 0.75).max(560.0));
     let _ = win.set_size(size);
     let _ = win.center();
+}
+
+fn dispatch_shortcut(app: &AppHandle, chord: hotkey::Chord) {
+    use gesture_platform::window;
+    let state = app.state::<AppState>();
+    // Registration updates wait for this thread, so never block on the configuration lock here.
+    let Ok(config) = state.config.try_read() else { return };
+    if hotkey::Chord::parse(&config.settings.toggle_hotkey).ok() == Some(chord) {
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || set_enabled(&handle, !hook::is_enabled()));
+        return;
+    }
+    if config.settings.is_blacklisted(&window::foreground_exe()) {
+        return;
+    }
+    let Some(shortcut) = config.shortcuts.iter().find(|shortcut| {
+        hotkey::Chord::parse(&shortcut.keys).ok() == Some(chord)
+    }) else { return };
+    let action = shortcut.action.clone();
+    drop(config);
+    action::spawn_from_shortcut(app.clone(), action, chord);
 }
 
 fn show_settings(app: &AppHandle) {

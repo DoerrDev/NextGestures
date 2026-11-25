@@ -10,6 +10,7 @@ import {
   Copy,
   ExternalLink,
   Globe,
+  Keyboard,
   LayoutGrid,
   List,
   MoreHorizontal,
@@ -39,6 +40,7 @@ import { GesturePane } from './components/GesturePane'
 import { ProfileDialog } from './components/ProfileDialog'
 import { SettingsDialog } from './components/SettingsDialog'
 import { BlacklistDialog } from './components/BlacklistDialog'
+import { ShortcutsDialog } from './components/ShortcutsDialog'
 import { StrokeCanvas } from './components/StrokeCanvas'
 import { VersionDialog } from './components/VersionDialog'
 
@@ -61,6 +63,7 @@ export function App() {
   const [editing, setEditing] = useState<{ gesture: Gesture; isNew: boolean } | null>(null)
   const [profileOpen, setProfileOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [blacklistOpen, setBlacklistOpen] = useState(false)
   const [unread, setUnread] = useState(0)
   const [enabled, setEnabled] = useState(true)
@@ -178,6 +181,7 @@ export function App() {
   if (!config || !active) return null
 
   const onCount = active.gestures.filter((g) => g.enabled).length
+  const shortcuts = config.shortcuts ?? []
   const blacklist = config.settings.blacklist ?? []
   const isBlacklisted = (exe: string) => !!exe && blacklist.some((name) => name.trim().toLowerCase() === exe.toLowerCase())
   const activeBlocked = isBlacklisted(active.exe)
@@ -360,6 +364,13 @@ export function App() {
               <Plus size={15} strokeWidth={2} />
               {t('addProfile')}
             </button>
+            <div className="side-blacklist">
+              <button type="button" className="prof" onClick={() => setShortcutsOpen(true)}>
+                <Keyboard size={16} className="prof-icon" />
+                <span>{t('shortcuts')}</span>
+                <small>{shortcuts.length}</small>
+              </button>
+            </div>
             <div className="side-blacklist">
               <button type="button" className="prof" onClick={() => setBlacklistOpen(true)}>
                 <Ban size={16} className="prof-icon" />
@@ -777,6 +788,13 @@ export function App() {
           onSave={saveSettings}
           onClose={() => setSettingsOpen(false)}
         />
+      )}
+      {shortcutsOpen && (
+        <ShortcutsDialog shortcuts={shortcuts} onClose={() => setShortcutsOpen(false)} onSave={async (shortcuts) => {
+          await api.saveShortcuts(shortcuts)
+          await reload()
+          flash(t('shortcutSaved'))
+        }} />
       )}
       {blacklistOpen && (
         <BlacklistDialog names={blacklist} onChange={saveBlacklist} onClose={() => setBlacklistOpen(false)} />
