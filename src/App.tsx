@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { getVersion } from '@tauri-apps/api/app'
 import { check, type Update } from '@tauri-apps/plugin-updater'
@@ -20,7 +20,6 @@ import {
   TriangleAlert,
   Zap,
 } from 'lucide-react'
-import BrandMark from './components/BrandMark'
 import {
   api,
   cloneGesture,
@@ -38,7 +37,7 @@ import { ProfileDialog } from './components/ProfileDialog'
 import { SettingsDialog } from './components/SettingsDialog'
 import { BlacklistDialog } from './components/BlacklistDialog'
 import { StrokeCanvas } from './components/StrokeCanvas'
-import { UpdateDialog } from './components/UpdateDialog'
+import { VersionDialog } from './components/VersionDialog'
 
 const TRIGGER_LABEL: Record<string, string> = {
   Right: '右键',
@@ -63,7 +62,9 @@ export function App() {
   const [toast, setToast] = useState('')
   const [confirmRemove, setConfirmRemove] = useState<Profile | null>(null)
   const [update, setUpdate] = useState<Update | null>(null)
-  const [updateOpen, setUpdateOpen] = useState(false)
+  const [versionOpen, setVersionOpen] = useState(false)
+  const [updateStatus, setUpdateStatus] = useState<'checking' | 'checked' | 'failed'>('checking')
+  const checkingUpdate = useRef(false)
   const [version, setVersion] = useState('')
   // 手写动画只在页面首次加载时播放；播完摘掉动画类，窗口再次显示时不会重播
   const [brandWritten, setBrandWritten] = useState(false)
@@ -128,14 +129,34 @@ export function App() {
     return () => offs.forEach((p) => void p.then((off) => off()))
   }, [reload])
 
+  const checkForUpdates = useCallback(async () => {
+    if (checkingUpdate.current) return
+    checkingUpdate.current = true
+    setUpdateStatus('checking')
+    try {
+      setUpdate(await check({ timeout: 10_000 }))
+      setUpdateStatus('checked')
+    } catch (e) {
+      setUpdate(null)
+      setUpdateStatus('failed')
+      console.error('检查更新失败', e)
+    } finally {
+      checkingUpdate.current = false
+    }
+  }, [])
+
   useEffect(() => {
     getVersion()
       .then(setVersion)
       .catch((e) => console.error('获取版本号失败', e))
-    check()
-      .then((u) => u && setUpdate(u))
-      .catch((e) => console.error('检查更新失败', e))
-  }, [])
+    void checkForUpdates()
+  }, [checkForUpdates])
+
+  useEffect(() => {
+    if (update) return () => {
+      void update.close().catch((e) => console.error('释放更新资源失败', e))
+    }
+  }, [update])
 
   const active: Profile | null = config
     ? config.profiles.find((p) => p.id === activeId) ?? config.profiles[0]
@@ -234,22 +255,22 @@ export function App() {
   return (
     <div className="shell">
       <header className="topbar">
-        <div className="brand">
-          <BrandMark size={24} />
-          <span
-            className={brandWritten ? 'brand-wordmark' : 'brand-wordmark writing'}
-            onAnimationEnd={() => setBrandWritten(true)}
-          >
-            {t('appName')}
-          </span>
-        </div>
+        <span
+          className={brandWritten ? 'brand-wordmark' : 'brand-wordmark writing'}
+          onAnimationEnd={() => setBrandWritten(true)}
+        >
+          {t('appName')}
+        </span>
         {version && (
           <button
             type="button"
             className={update ? 'version-tag has-update' : 'version-tag'}
-            title={update ? `${t('updateHint')} v${update.version}` : t('updateCurrent')}
-            disabled={!update}
-            onClick={() => setUpdateOpen(true)}
+            title={update ? `${t('updateHint')} v${update.version}` : t('versionHint')}
+            aria-haspopup="dialog"
+            onClick={() => {
+              setVersionOpen(true)
+              void checkForUpdates()
+            }}
           >
             v{version}
             {update && <span className="dot" />}
@@ -773,7 +794,15 @@ export function App() {
           {toast}
         </div>
       )}
-      {update && updateOpen && <UpdateDialog update={update} onClose={() => setUpdateOpen(false)} />}
+      {versionOpen && (
+        <VersionDialog
+          version={version}
+          update={update}
+          updateStatus={updateStatus}
+          onCheck={checkForUpdates}
+          onClose={() => setVersionOpen(false)}
+        />
+      )}
     </div>
   )
 }

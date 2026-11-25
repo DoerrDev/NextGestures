@@ -679,12 +679,6 @@ textarea {
   border-bottom: 1px solid var(--color-charcoal-ink);
 }
 
-.brand {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-8);
-}
-
 /* 手写字标：加载时从左到右"写"出来 */
 .brand-wordmark {
   font-family: 'Caveat', 'Segoe Print', cursive;
@@ -727,15 +721,16 @@ textarea {
   font: inherit;
   font-size: 12px;
   opacity: 0.55;
-  cursor: default;
-}
-
-.version-tag.has-update {
-  opacity: 1;
   cursor: pointer;
 }
 
-.version-tag.has-update:hover {
+.version-tag.has-update,
+.version-tag:hover,
+.version-tag:focus-visible {
+  opacity: 1;
+}
+
+.version-tag:hover {
   text-decoration: underline;
 }
 
@@ -1327,6 +1322,52 @@ textarea {
 
 .dialog.narrow {
   max-width: 460px;
+}
+
+.version-dialog {
+  margin: auto;
+  padding: 0;
+  width: min(600px, calc(100% - 48px));
+  max-height: calc(100% - 48px);
+  color: inherit;
+}
+
+.version-dialog:not([open]) {
+  display: none;
+}
+
+.version-dialog::backdrop {
+  background: rgba(56, 56, 56, 0.35);
+}
+
+.release-notes {
+  display: grid;
+  gap: var(--spacing-8);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.release-notes h4,
+.release-notes p,
+.release-notes ul,
+.version-dialog section > p {
+  margin: 0;
+}
+
+.release-notes p {
+  white-space: pre-wrap;
+}
+
+.release-notes ul {
+  padding-left: 1.4em;
+}
+
+.version-update {
+  display: grid;
+  gap: var(--spacing-8);
+  margin-top: var(--spacing-16);
+  padding-top: var(--spacing-16);
+  border-top: 1px solid var(--color-charcoal-ink);
 }
 
 .dialog-head {

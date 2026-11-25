@@ -214,10 +214,17 @@ const zhCN = {
   updateAvailable: '发现新版本',
   updateCurrent: '当前版本',
   updateNow: '立即更新',
-  updateLater: '稍后',
   updateDownloading: '下载安装中…',
   updateFailed: '更新失败：',
   updateHint: '发现新版本，点击查看',
+  versionHint: '查看发布说明并检查更新',
+  versionNotes: '发布说明',
+  versionNotesMissing: '此版本暂无发布说明。',
+  updateSection: '检查更新',
+  updateChecking: '正在检查更新…',
+  updateCheckFailed: '检查更新失败，请稍后重试。',
+  updateUpToDate: '已是最新版本。',
+  updateRetry: '重新检查',
 }
 
 const dicts = { 'zh-CN': zhCN }
