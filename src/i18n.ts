@@ -17,6 +17,7 @@ const zhCN = {
   aiBaseUrl: 'OpenAI 兼容接口地址',
   aiApiKey: 'API 密钥',
   aiModel: '模型',
+  aiShowPolishNotes: '显示英语优化提示',
   aiActionHint: '触发 QuickFormater 动作时，选中文字将发送到已配置的 AI 服务。',
   appName: 'NextGestures',
   profiles: '配置组',

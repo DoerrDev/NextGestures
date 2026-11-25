@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io::{BufRead, BufReader, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -34,11 +35,23 @@ impl Mode {
         }
     }
 
-    fn prompt(self) -> &'static str {
+    fn prompt(self, show_polish_notes: bool) -> Cow<'static, str> {
         match self {
-            Self::Polish => include_str!("quickformater/polish.txt"),
-            Self::Translate => include_str!("quickformater/translate.txt"),
-            Self::Jyutping => include_str!("quickformater/yueping.txt"),
+            Self::Polish => {
+                let prompt = include_str!("quickformater/polish.txt");
+                if show_polish_notes {
+                    format!(
+                        "{prompt}\n{}",
+                        include_str!("quickformater/polish_notes.txt")
+                    )
+                    .into()
+                } else {
+                    format!("{prompt}\nOutput only the corrected text. Do not include notes.")
+                        .into()
+                }
+            }
+            Self::Translate => include_str!("quickformater/translate.txt").into(),
+            Self::Jyutping => include_str!("quickformater/yueping.txt").into(),
         }
     }
 }
@@ -90,7 +103,7 @@ fn request(
         "model": config.model.trim(),
         "stream": true,
         "messages": [
-            {"role": "system", "content": mode.prompt().trim()},
+            {"role": "system", "content": mode.prompt(config.show_polish_notes).trim()},
             {"role": "user", "content": format!("<text>\n{source}\n</text>")},
         ],
     });
@@ -178,6 +191,21 @@ fn parse_response(
     Ok(text)
 }
 
+fn split_polish_notes(output: &str) -> (&str, &str) {
+    let mut offset = 0;
+    for line in output.split_inclusive('\n') {
+        if line.trim() == "<notes>" {
+            let notes = &output[offset + line.len()..];
+            return (
+                &output[..offset],
+                notes.trim().trim_end_matches("</notes>").trim(),
+            );
+        }
+        offset += line.len();
+    }
+    (output, "")
+}
+
 fn clean_output(original: &str, output: &str) -> String {
     let mut body = output.trim();
     if let Some(text) = body
@@ -258,6 +286,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn polish_prompt_respects_notes_setting() {
+        assert!(Mode::Polish.prompt(true).contains("Simplified Chinese"));
+        assert!(Mode::Polish.prompt(false).contains("Do not include notes"));
+        assert!(!Mode::Polish.prompt(false).contains("<notes>"));
+    }
+
+    #[test]
     fn accepts_stream_and_json() {
         let stream = b"data: {\"choices\":[{\"delta\":{\"content\":\"hello \"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"world\"}}]}\n\ndata: [DONE]\n";
         assert_eq!(
@@ -318,6 +353,7 @@ mod tests {
                 base_url: format!("http://{}/v1", listener.local_addr().unwrap()),
                 model: "fixture-model".into(),
                 api_key: "fixture-key".into(),
+                ..Default::default()
             };
             let worker = std::thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap();

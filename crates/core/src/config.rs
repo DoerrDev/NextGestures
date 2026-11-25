@@ -325,12 +325,24 @@ impl Default for Settings {
     }
 }
 
-#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AiSettings {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    pub show_polish_notes: bool,
+}
+
+impl Default for AiSettings {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            api_key: String::new(),
+            model: String::new(),
+            show_polish_notes: true,
+        }
+    }
 }
 
 impl std::fmt::Debug for AiSettings {
@@ -338,6 +350,7 @@ impl std::fmt::Debug for AiSettings {
         f.debug_struct("AiSettings")
             .field("base_url", &self.base_url)
             .field("model", &self.model)
+            .field("show_polish_notes", &self.show_polish_notes)
             .finish_non_exhaustive()
     }
 }
@@ -603,6 +616,17 @@ mod tests {
         assert!(back.profiles[0].gestures.is_empty());
         assert_eq!(back.plugins, PluginSettings::default());
         assert_eq!(back.settings.move_threshold, 20);
+    }
+
+    #[test]
+    fn polish_notes_default_on_and_can_be_disabled_persistently() {
+        let cfg: Config = toml::from_str("[plugins.ai]\nmodel = 'custom'").unwrap();
+        assert!(cfg.plugins.ai.show_polish_notes);
+        let mut cfg = cfg;
+        cfg.plugins.ai.show_polish_notes = false;
+        let restored: Config = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert!(!restored.plugins.ai.show_polish_notes);
+        assert_eq!(restored.plugins.ai.model, "custom");
     }
 
     #[test]

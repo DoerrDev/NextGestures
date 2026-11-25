@@ -64,6 +64,12 @@ impl Target {
 }
 
 pub fn editable(target: Target) -> bool {
+    if !target.is_current() {
+        return false;
+    }
+    if let Some(editable) = native_editability(HWND(target.focus as _)) {
+        return editable;
+    }
     // 可访问性提供程序可能跨进程阻塞。超时则展示结果供手动复制。
     let (send, receive) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
@@ -73,6 +79,20 @@ pub fn editable(target: Target) -> bool {
     receive
         .recv_timeout(Duration::from_millis(700))
         .unwrap_or(false)
+}
+
+fn native_editability(focus: HWND) -> Option<bool> {
+    let mut name = [0; 64];
+    let len = unsafe { GetClassNameW(focus, &mut name) };
+    if len <= 0 {
+        return None;
+    }
+    let class = String::from_utf16_lossy(&name[..len as usize]).to_ascii_lowercase();
+    if class == "edit" || class.starts_with("richedit") {
+        let style = unsafe { GetWindowLongW(focus, GWL_STYLE) };
+        return Some(style & (ES_READONLY | ES_PASSWORD) == 0);
+    }
+    None
 }
 
 fn inspect_editability() -> Option<bool> {
@@ -97,15 +117,21 @@ fn inspect_editability() -> Option<bool> {
             return value.CurrentIsReadOnly().ok().map(|value| !value.as_bool());
         }
         // RichEdit 和部分浏览器编辑器将只读标记暴露在 TextPattern 的选区上。
-        let pattern = focused.GetCurrentPattern(UIA_TextPatternId).ok()?;
-        let text = pattern.cast::<IUIAutomationTextPattern>().ok()?;
-        let range = text.GetSelection().ok()?.GetElement(0).ok()?;
-        let attr = range.GetAttributeValue(UIA_IsReadOnlyAttributeId).ok()?;
-        if attr.Anonymous.Anonymous.vt != VT_BOOL {
-            return None;
+        let range_read_only = (|| {
+            let pattern = focused.GetCurrentPattern(UIA_TextPatternId).ok()?;
+            let text = pattern.cast::<IUIAutomationTextPattern>().ok()?;
+            let range = text.GetSelection().ok()?.GetElement(0).ok()?;
+            let attr = range.GetAttributeValue(UIA_IsReadOnlyAttributeId).ok()?;
+            if attr.Anonymous.Anonymous.vt != VT_BOOL {
+                return None;
+            }
+            bool::try_from(&attr).ok()
+        })();
+        if let Some(read_only) = range_read_only {
+            return Some(!read_only);
         }
-        let read_only = bool::try_from(&attr).ok()?;
-        Some(!read_only)
+        // Some custom editors expose the Edit role but no Value or Text pattern.
+        Some(focused.CurrentControlType().ok()? == UIA_EditControlTypeId)
     }
 }
 

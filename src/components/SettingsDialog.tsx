@@ -163,7 +163,7 @@ export function SettingsDialog({ initial, initialPlugins, configPath, unread, on
 
   const xLimit = Math.floor(screenSize.width / 2)
   const yLimit = Math.floor(screenSize.height / 2)
-  const setAiField = (field: keyof Plugins['ai'], value: string) => {
+  const setAiField = <K extends keyof Plugins['ai'],>(field: K, value: Plugins['ai'][K]) => {
     setPlugins((current) => ({ ...current, ai: { ...current.ai, [field]: value } }))
   }
 
@@ -469,6 +469,14 @@ export function SettingsDialog({ initial, initialPlugins, configPath, unread, on
                     spellCheck={false}
                   />
                 </div>
+                <label className="check field">
+                  <input
+                    type="checkbox"
+                    checked={plugins.ai.show_polish_notes}
+                    onChange={(e) => setAiField('show_polish_notes', e.target.checked)}
+                  />
+                  {t('aiShowPolishNotes')}
+                </label>
                 <p className="field-note">{t('aiActionHint')}</p>
               </>
             )}

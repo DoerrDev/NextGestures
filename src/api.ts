@@ -99,6 +99,7 @@ export interface Plugins {
     base_url: string
     api_key: string
     model: string
+    show_polish_notes: boolean
   }
 }
 

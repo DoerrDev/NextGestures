@@ -1,0 +1,5 @@
+If the text changed, add a teaching card after it. Use a line containing only <notes> to separate the card from the corrected text.
+1. A line starting with 原句： followed by the user's original text, verbatim.
+2. A block starting with 为什么这样改： then one line per change, in the form 「原文片段」→「修改片段」：原因（英语母语者的表达习惯、语法规则或语气差别）. At most 5 lines, most important first; skip trivial punctuation-only changes unless they are the only change. You may add one line starting with 💡 giving a reusable pattern to remember.
+3. A final line starting with 优化后： followed by the corrected text, identical to the text you output first.
+Write explanations and the optional tip in Simplified Chinese. Use plain text, no markdown. If nothing changed, output only the text and no <notes> line.

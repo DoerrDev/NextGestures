@@ -39,7 +39,7 @@ enum Update {
 
 enum Completion {
     Card(Kind, String, u32),
-    Pasted,
+    Silent,
 }
 
 fn card(anchor: RECT, kind: Kind, text: &str, estimate: Option<&str>, auto_close_ms: u32) {
@@ -58,13 +58,11 @@ fn card(anchor: RECT, kind: Kind, text: &str, estimate: Option<&str>, auto_close
 
 fn complete(
     mode: Mode,
+    show_polish_notes: bool,
     source: &str,
     output: &str,
-    owner: usize,
-    target: selection::Target,
-    cancelled: &AtomicBool,
+    replace: impl FnOnce(&str) -> bool,
 ) -> Result<Completion> {
-    let active = || !cancelled.load(Ordering::Acquire);
     let kind = if mode == Mode::Jyutping {
         Kind::Yueping
     } else {
@@ -76,20 +74,20 @@ fn complete(
         return Ok(Completion::Card(kind, text, 0));
     }
 
-    let (body, notes) = output.split_once("<notes>").unwrap_or((output, ""));
-    let notes = notes.trim().trim_end_matches("</notes>").trim();
+    let (body, notes) = super::split_polish_notes(output);
+    let notes = if show_polish_notes { notes } else { "" };
     let text = clean_output(source, body);
     ensure!(!text.trim().is_empty(), "AI 返回了空内容");
     if text == source {
-        return Ok(Completion::Card(
-            Kind::Info,
-            "這句已經很自然，無需修改 👍".into(),
-            2500,
-        ));
+        return Ok(if show_polish_notes {
+            Completion::Card(Kind::Info, "原文已经很自然，无需修改 👍".into(), 2500)
+        } else {
+            Completion::Silent
+        });
     }
-    if active() && selection::replace(owner, target, source, &text, active).unwrap_or(false) {
+    if replace(&text) {
         return Ok(if notes.is_empty() {
-            Completion::Pasted
+            Completion::Silent
         } else {
             Completion::Card(Kind::Tutor, notes.to_owned(), 0)
         });
@@ -174,13 +172,17 @@ pub(super) fn run(
             })
             .and_then(|output| {
                 ensure!(!worker_cancelled.load(Ordering::Acquire), "请求已取消");
+                let active = || !worker_cancelled.load(Ordering::Acquire);
                 complete(
                     mode,
+                    config.show_polish_notes,
                     &worker_source,
                     &output,
-                    owner,
-                    target,
-                    &worker_cancelled,
+                    |text| {
+                        active()
+                            && selection::replace(owner, target, &worker_source, text, active)
+                                .unwrap_or(false)
+                    },
                 )
             });
             post(Update::Done(result));
@@ -217,7 +219,7 @@ pub(super) fn run(
             if let Some(result) = completion {
                 spinner::hide();
                 match result {
-                    Ok(Completion::Pasted) => return false,
+                    Ok(Completion::Silent) => return false,
                     Ok(Completion::Card(_, text, _)) if popup::is_open() => popup::finish(&text),
                     Ok(Completion::Card(kind, text, timeout)) => {
                         card(anchor, kind, &text, None, timeout)
@@ -279,5 +281,53 @@ fn message_loop(mut thread_message: impl FnMut(u32) -> bool) {
                 DispatchMessageW(&message);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn polish_pastes_only_corrected_text_with_either_notes_setting() {
+        for show_notes in [true, false] {
+            let result = complete(
+                Mode::Polish,
+                show_notes,
+                "  he go",
+                "He goes\r\n<notes>\r\n主语是第三人称单数。",
+                |text| {
+                    assert_eq!(text, "  He goes");
+                    true
+                },
+            )
+            .unwrap();
+            if show_notes {
+                assert!(
+                    matches!(result, Completion::Card(Kind::Tutor, notes, 0) if notes == "主语是第三人称单数。")
+                );
+            } else {
+                assert!(matches!(result, Completion::Silent));
+            }
+        }
+    }
+
+    #[test]
+    fn polish_without_notes_keeps_copyable_fallback_but_skips_no_change_popup() {
+        let unchanged = complete(Mode::Polish, false, "Hello", "Hello", |_| {
+            panic!("unchanged text should not be pasted")
+        })
+        .unwrap();
+        assert!(matches!(unchanged, Completion::Silent));
+
+        let no_paste = complete(
+            Mode::Polish,
+            false,
+            "helo",
+            "Hello\n<notes>\n拼写",
+            |_| false,
+        )
+        .unwrap();
+        assert!(matches!(no_paste, Completion::Card(Kind::Result, text, 0) if text == "Hello"));
     }
 }
