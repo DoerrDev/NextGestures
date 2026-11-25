@@ -82,25 +82,20 @@ export interface Settings {
   language: string
   api_base: string
   feedback_nickname: string
+  ai: AiSettings
 }
 
 export interface Config {
   version: number
   settings: Settings
   profiles: Profile[]
-  plugins: Plugins
 }
 
-export interface Plugins {
-  screenshot: boolean
-  recorder: boolean
-  quickformater: boolean
-  ai: {
-    base_url: string
-    api_key: string
-    model: string
-    show_polish_notes: boolean
-  }
+export interface AiSettings {
+  base_url: string
+  api_key: string
+  model: string
+  show_polish_notes: boolean
 }
 
 export interface RecordedPayload {
@@ -133,7 +128,6 @@ export const api = {
   getConfig: () => invoke<Config>('get_config'),
   configPath: () => invoke<string>('config_path'),
   saveSettings: (settings: Settings) => invoke<void>('save_settings', { settings }),
-  setPlugins: (plugins: Plugins) => invoke<void>('set_plugins', { plugins }),
   saveBlacklist: (names: string[]) => invoke<void>('save_blacklist', { names }),
   upsertGesture: (profileId: string, gesture: Gesture) =>
     invoke<void>('upsert_gesture', { profileId, gesture }),

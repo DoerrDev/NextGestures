@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Check, Info, MessageCircle, MessageSquareText, MousePointer2, Pipette, Plug, Sparkles, Spline, X } from 'lucide-react'
-import { api, TRIGGERS, type Plugins, type Point, type Settings, type TriggerButton, type VirtualScreenSize } from '../api'
+import { Check, Info, MessageCircle, MessageSquareText, MousePointer2, Pipette, Sparkles, Spline, X } from 'lucide-react'
+import { api, TRIGGERS, type AiSettings, type Point, type Settings, type TriggerButton, type VirtualScreenSize } from '../api'
 import { t, type Key } from '../i18n'
 import { HotkeyRecorder } from './HotkeyRecorder'
 import { StrokeCanvas } from './StrokeCanvas'
@@ -8,11 +8,10 @@ import { FeedbackPane } from './FeedbackPane'
 
 interface Props {
   initial: Settings
-  initialPlugins: Plugins
   configPath: string
   /** 来自开发者的未读回复数，用于页签红点 */
   unread: number
-  onSave: (settings: Settings, plugins: Plugins, pluginsChanged: boolean) => void
+  onSave: (settings: Settings) => void
   onClose: () => void
 }
 
@@ -51,17 +50,10 @@ const TABS: { id: string; label: Key; icon: typeof Info }[] = [
   { id: 'trigger', label: 'tabTrigger', icon: MousePointer2 },
   { id: 'trail', label: 'tabTrail', icon: Spline },
   { id: 'hint', label: 'tabHint', icon: MessageSquareText },
-  { id: 'plugins', label: 'tabPlugins', icon: Plug },
   { id: 'ai', label: 'tabAi', icon: Sparkles },
   { id: 'feedback', label: 'tabFeedback', icon: MessageCircle },
   { id: 'about', label: 'tabAbout', icon: Info },
 ]
-
-const PLUGIN_TOGGLES = [
-  { key: 'screenshot', label: 'pluginScreenshot' },
-  { key: 'recorder', label: 'pluginRecorder' },
-  { key: 'quickformater', label: 'pluginQuickFormater' },
-] as const
 
 function ColorField({
   id,
@@ -119,9 +111,8 @@ function ColorField({
   )
 }
 
-export function SettingsDialog({ initial, initialPlugins, configPath, unread, onSave, onClose }: Props) {
+export function SettingsDialog({ initial, configPath, unread, onSave, onClose }: Props) {
   const [s, setS] = useState<Settings>(initial)
-  const [plugins, setPlugins] = useState<Plugins>(initialPlugins)
   const [tab, setTab] = useState('trigger')
   const [autostart, setAutostart] = useState(false)
   const [screenSize, setScreenSize] = useState<VirtualScreenSize>({ width: 1920, height: 1080 })
@@ -163,8 +154,8 @@ export function SettingsDialog({ initial, initialPlugins, configPath, unread, on
 
   const xLimit = Math.floor(screenSize.width / 2)
   const yLimit = Math.floor(screenSize.height / 2)
-  const setAiField = <K extends keyof Plugins['ai'],>(field: K, value: Plugins['ai'][K]) => {
-    setPlugins((current) => ({ ...current, ai: { ...current.ai, [field]: value } }))
+  const setAiField = <K extends keyof AiSettings,>(field: K, value: AiSettings[K]) => {
+    setS((current) => ({ ...current, ai: { ...current.ai, [field]: value } }))
   }
 
   return (
@@ -179,7 +170,7 @@ export function SettingsDialog({ initial, initialPlugins, configPath, unread, on
 
         <div className="dialog-body settings-body">
           <nav className="tabs">
-            {TABS.filter((x) => x.id !== 'ai' || plugins.quickformater).map((x) => (
+            {TABS.map((x) => (
               <button
                 key={x.id}
                 type="button"
@@ -417,33 +408,14 @@ export function SettingsDialog({ initial, initialPlugins, configPath, unread, on
               </>
             )}
 
-            {tab === 'plugins' && (
-              <>
-                {PLUGIN_TOGGLES.map(({ key, label }) => (
-                  <label className="check field" key={key}>
-                    <input
-                      type="checkbox"
-                      checked={plugins[key]}
-                      onChange={(e) => {
-                        const enabled = e.target.checked
-                        setPlugins((current) => ({ ...current, [key]: enabled }))
-                      }}
-                    />
-                    {t(label)}
-                  </label>
-                ))}
-                <p className="field-note">{t('pluginSettingsHint')}</p>
-              </>
-            )}
-
-            {tab === 'ai' && plugins.quickformater && (
+            {tab === 'ai' && (
               <>
                 <div className="field">
                   <label htmlFor="ai-base-url">{t('aiBaseUrl')}</label>
                   <input
                     id="ai-base-url"
                     type="url"
-                    value={plugins.ai.base_url}
+                    value={s.ai.base_url}
                     onChange={(e) => setAiField('base_url', e.target.value)}
                     placeholder="https://api.openai.com/v1"
                     spellCheck={false}
@@ -454,7 +426,7 @@ export function SettingsDialog({ initial, initialPlugins, configPath, unread, on
                   <input
                     id="ai-api-key"
                     type="password"
-                    value={plugins.ai.api_key}
+                    value={s.ai.api_key}
                     onChange={(e) => setAiField('api_key', e.target.value)}
                     autoComplete="off"
                   />
@@ -464,7 +436,7 @@ export function SettingsDialog({ initial, initialPlugins, configPath, unread, on
                   <input
                     id="ai-model"
                     type="text"
-                    value={plugins.ai.model}
+                    value={s.ai.model}
                     onChange={(e) => setAiField('model', e.target.value)}
                     spellCheck={false}
                   />
@@ -472,7 +444,7 @@ export function SettingsDialog({ initial, initialPlugins, configPath, unread, on
                 <label className="check field">
                   <input
                     type="checkbox"
-                    checked={plugins.ai.show_polish_notes}
+                    checked={s.ai.show_polish_notes}
                     onChange={(e) => setAiField('show_polish_notes', e.target.checked)}
                   />
                   {t('aiShowPolishNotes')}
@@ -512,9 +484,7 @@ export function SettingsDialog({ initial, initialPlugins, configPath, unread, on
           <button type="button" className="btn-outline subtle" onClick={onClose}>
             {t('cancel')}
           </button>
-          <button type="button" className="btn-primary" onClick={() => {
-            onSave(s, plugins, JSON.stringify(plugins) !== JSON.stringify(initialPlugins))
-          }}>
+          <button type="button" className="btn-primary" onClick={() => onSave(s)}>
             <Check size={16} strokeWidth={2} />
             {t('save')}
           </button>

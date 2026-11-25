@@ -17,10 +17,7 @@ pub fn spawn(app: AppHandle, action: Action) {
         if let Err(e) = run(&app, &action) {
             log::error!("执行动作失败: {e:#}");
             // The AI worker handles errors after it starts. This covers launch and URL errors.
-            if action.is_ai() {
-                crate::engine::toast(&app, &e.to_string());
-            }
-            if matches!(action, Action::LaunchApp { .. } | Action::OpenUrl { .. }) {
+            if action.is_ai() || matches!(action, Action::LaunchApp { .. } | Action::OpenUrl { .. }) {
                 crate::engine::toast(&app, &e.to_string());
             }
         }
@@ -30,13 +27,17 @@ pub fn spawn(app: AppHandle, action: Action) {
 pub fn run(app: &AppHandle, action: &Action) -> Result<()> {
     match action {
         Action::None => Ok(()),
-        Action::Screenshot
-        | Action::RecordRegion
-        | Action::AiJyutping
-        | Action::AiTranslate
-        | Action::AiPolish => {
-            let plugins = app.state::<AppState>().config.read().unwrap().plugins.clone();
-            crate::plugins::execute(app, action, &plugins)
+        Action::Screenshot => {
+            crate::pin::spawn(app.clone());
+            Ok(())
+        }
+        Action::RecordRegion => {
+            crate::recorder::spawn(app.clone());
+            Ok(())
+        }
+        Action::AiJyutping | Action::AiTranslate | Action::AiPolish => {
+            let ai = app.state::<AppState>().config.read().unwrap().settings.ai.clone();
+            crate::quickformater::spawn(app, action, &ai)
         }
         Action::Command { program, args, shell } => run_command(program, args, *shell),
         Action::LaunchApp { app_id, name } => {

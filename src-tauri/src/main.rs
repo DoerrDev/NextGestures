@@ -7,7 +7,6 @@ mod engine;
 mod feedback;
 mod overlay;
 mod pin;
-mod plugins;
 mod quickformater;
 mod recorder;
 mod state;
@@ -54,7 +53,6 @@ fn main() {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
-            commands::set_plugins,
             commands::config_path,
             commands::save_settings,
             commands::save_blacklist,

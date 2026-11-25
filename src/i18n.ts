@@ -1,12 +1,5 @@
 const zhCN = {
-  tabPlugins: '插件',
   tabAi: 'AI 设置',
-  pluginScreenshot: '截图',
-  pluginRecorder: '录屏',
-  pluginQuickFormater: 'QuickFormater 文本处理',
-  pluginSettingsHint: '保存后，在手势编辑器中选择已启用插件的动作。',
-  pluginDisabled: '插件未启用',
-  pluginDisabledHint: '已保留此动作。请在设置的「插件」页启用对应插件。',
   actionScreenshot: '区域截图并置顶',
   screenshotActionHint: '触发后拖出截图区域。贴图底部可复制、保存或调节透明度。按空格折叠或恢复，双击关闭。',
   actionRecordRegion: '区域录屏',

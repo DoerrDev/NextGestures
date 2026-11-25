@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering::Relaxed;
 
-use gesture_core::{Action, Config, Gesture, KeySequenceEvent, PluginSettings, Profile, Settings};
+use gesture_core::{Action, Config, Gesture, KeySequenceEvent, Profile, Settings};
 use gesture_platform::keyrec::{self, KeyRecEvent};
 use gesture_platform::{hook, shell, window};
 use serde::{Deserialize, Serialize};
@@ -82,13 +82,6 @@ pub fn save_settings(app: AppHandle, state: State<AppState>, mut settings: Setti
     // 「触发提示置顶」立即生效，不必等下一次手势
     let _ = crate::overlay::apply_z_order(&app);
     Ok(())
-}
-
-#[tauri::command]
-pub fn set_plugins(app: AppHandle, state: State<AppState>, plugins: PluginSettings) -> R<()> {
-    state.config.write().unwrap().plugins = plugins;
-    commit(&app)?;
-    app.emit("config:changed", ()).map_err(err)
 }
 
 #[tauri::command]

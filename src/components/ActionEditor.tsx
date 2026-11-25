@@ -1,5 +1,5 @@
 import { Play } from 'lucide-react'
-import { api, type Action, type Plugins } from '../api'
+import { api, type Action } from '../api'
 import { t, type Key } from '../i18n'
 import { HotkeyRecorder } from './HotkeyRecorder'
 import { KeySequenceRecorder } from './KeySequenceRecorder'
@@ -7,18 +7,9 @@ import { ProgramPicker } from './ProgramPicker'
 
 interface Props {
   action: Action
-  plugins: Plugins
   onChange: (action: Action) => void
   onError: (msg: string) => void
   onRecordingChange: (recording: boolean) => void
-}
-
-const PLUGIN_FOR_ACTION: Partial<Record<Action['kind'], 'screenshot' | 'recorder' | 'quickformater'>> = {
-  screenshot: 'screenshot',
-  record_region: 'recorder',
-  ai_jyutping: 'quickformater',
-  ai_translate: 'quickformater',
-  ai_polish: 'quickformater',
 }
 
 type EditorKind = Exclude<Action['kind'], 'command'>
@@ -59,9 +50,9 @@ function blank(kind: EditorKind): Action {
   }
 }
 
-export function ActionEditor({ action, plugins, onChange, onError, onRecordingChange }: Props) {
-  const currentPlugin = PLUGIN_FOR_ACTION[action.kind]
-  const isDisabled = currentPlugin !== undefined && !plugins[currentPlugin]
+export function ActionEditor({ action, onChange, onError, onRecordingChange }: Props) {
+  const isAiAction = action.kind === 'ai_jyutping' || action.kind === 'ai_translate' || action.kind === 'ai_polish'
+  const canTest = action.kind === 'launch_app' || action.kind === 'hotkey' || action.kind === 'open_url' || action.kind === 'command'
 
   const test = async () => {
     try {
@@ -83,26 +74,19 @@ export function ActionEditor({ action, plugins, onChange, onError, onRecordingCh
           {action.kind === 'command' && (
             <option value="command" disabled>{t('legacyCommand')}</option>
           )}
-          {KINDS.map((kind) => {
-            const plugin = PLUGIN_FOR_ACTION[kind]
-            const disabled = plugin !== undefined && !plugins[plugin]
-            return (
-              <option key={kind} value={kind} disabled={disabled}>
-                {t(KIND_LABEL[kind])}{disabled ? ` · ${t('pluginDisabled')}` : ''}
-              </option>
-            )
-          })}
+          {KINDS.map((kind) => (
+            <option key={kind} value={kind}>{t(KIND_LABEL[kind])}</option>
+          ))}
         </select>
       </div>
 
-      {isDisabled && <p className="field-note">{t('pluginDisabledHint')}</p>}
-      {action.kind === 'screenshot' && !isDisabled && (
+      {action.kind === 'screenshot' && (
         <p className="field-note">{t('screenshotActionHint')}</p>
       )}
-      {action.kind === 'record_region' && !isDisabled && (
+      {action.kind === 'record_region' && (
         <p className="field-note">{t('recordActionHint')}</p>
       )}
-      {currentPlugin === 'quickformater' && !isDisabled && (
+      {isAiAction && (
         <p className="field-note">{t('aiActionHint')}</p>
       )}
 
@@ -148,7 +132,7 @@ export function ActionEditor({ action, plugins, onChange, onError, onRecordingCh
         </div>
       )}
 
-      {action.kind !== 'none' && action.kind !== 'key_sequence' && currentPlugin === undefined && (
+      {canTest && (
         <button type="button" className="btn-outline subtle" onClick={test}
           disabled={action.kind === 'launch_app' && !action.app_id}>
           <Play size={16} strokeWidth={2} />

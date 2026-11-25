@@ -18,7 +18,6 @@ import {
   type Gesture,
   type LivePayload,
   type Point,
-  type Plugins,
   type RecordedPayload,
   type TriggerButton,
 } from '../api'
@@ -28,7 +27,6 @@ import { StrokeCanvas } from './StrokeCanvas'
 
 interface Props {
   initial: Gesture
-  plugins: Plugins
   isNew: boolean
   onSave: (gesture: Gesture) => void
   onClose: () => void
@@ -50,7 +48,7 @@ type EdgeMode = 'wheel' | 'dwell' | `click:${TriggerButton}`
 
 const DEFAULT_DWELL_MS = 600
 
-export function GesturePane({ initial, plugins, isNew, onSave, onClose, onToggle, onDelete, onDuplicate }: Props) {
+export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelete, onDuplicate }: Props) {
   const [draft, setDraft] = useState<Gesture>(initial)
   const [recording, setRecording] = useState(false)
   const [sequenceRecording, setSequenceRecording] = useState(false)
@@ -290,7 +288,6 @@ export function GesturePane({ initial, plugins, isNew, onSave, onClose, onToggle
         <h3 className="pane-sect">{t('action')}</h3>
         <ActionEditor
           action={draft.action}
-          plugins={plugins}
           onChange={(action) => setDraft((current) => ({ ...current, action }))}
           onError={setError}
           onRecordingChange={setSequenceRecording}

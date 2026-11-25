@@ -197,9 +197,9 @@ impl Profile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     /// 按进程名停用全部手势；旧配置默认为空。
-    #[serde(default)]
     pub blacklist: Vec<String>,
     pub trigger_buttons: Vec<TriggerButton>,
     /// 进入手势态的最小移动距离（像素）
@@ -207,72 +207,33 @@ pub struct Settings {
     /// 相似度阈值 [0,1]
     pub match_threshold: f32,
     pub show_trail: bool,
-    #[serde(default)]
     pub quiet_mode: bool,
     pub trail_color: String,
     pub trail_width: f32,
     /// 轨迹辉光颜色
-    #[serde(default = "default_glow_color")]
     pub glow_color: String,
     /// 轨迹辉光扩散半径，0 表示关闭
-    #[serde(default = "default_glow_blur")]
     pub glow_blur: f32,
     /// 未匹配到手势时的轨迹颜色
-    #[serde(default = "default_miss_color")]
     pub miss_color: String,
     /// 手势名称提示的字号（CSS 像素）
-    #[serde(default = "default_gesture_hint_font_size")]
     pub gesture_hint_font_size: f32,
     /// 手势名称提示的文字颜色
-    #[serde(default = "default_gesture_hint_color")]
     pub gesture_hint_color: String,
     /// 相对屏幕中心的水平偏移（CSS 像素）
-    #[serde(default)]
     pub gesture_hint_offset_x: i32,
     /// 相对屏幕中心的垂直偏移（CSS 像素）
-    #[serde(default)]
     pub gesture_hint_offset_y: i32,
     /// 触发提示（轨迹 / 手势名称）是否置顶显示在所有窗口之上
-    #[serde(default = "default_true")]
     pub gesture_hint_topmost: bool,
     /// 开关手势的全局快捷键，如 ["ctrl", "alt", "g"]；空表示未设置
-    #[serde(default)]
     pub toggle_hotkey: Vec<String>,
     pub language: String,
     /// 统计 / 用户反馈后端地址
-    #[serde(default = "default_api_base")]
     pub api_base: String,
     /// 提交反馈时使用的昵称
-    #[serde(default)]
     pub feedback_nickname: String,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_api_base() -> String {
-    "https://software.sayhey.top".into()
-}
-
-fn default_glow_color() -> String {
-    "#00caf2".into()
-}
-
-fn default_miss_color() -> String {
-    "#a1a1a1".into()
-}
-
-fn default_glow_blur() -> f32 {
-    8.0
-}
-
-fn default_gesture_hint_font_size() -> f32 {
-    18.0
-}
-
-fn default_gesture_hint_color() -> String {
-    "#ffffff".into()
+    pub ai: AiSettings,
 }
 
 impl Settings {
@@ -309,18 +270,19 @@ impl Default for Settings {
             quiet_mode: false,
             trail_color: "#4d4dff".into(),
             trail_width: 3.0,
-            glow_color: default_glow_color(),
-            glow_blur: default_glow_blur(),
-            miss_color: default_miss_color(),
-            gesture_hint_font_size: default_gesture_hint_font_size(),
-            gesture_hint_color: default_gesture_hint_color(),
+            glow_color: "#00caf2".into(),
+            glow_blur: 8.0,
+            miss_color: "#a1a1a1".into(),
+            gesture_hint_font_size: 18.0,
+            gesture_hint_color: "#ffffff".into(),
             gesture_hint_offset_x: 0,
             gesture_hint_offset_y: 0,
             gesture_hint_topmost: true,
             toggle_hotkey: vec![],
             language: "zh-CN".into(),
-            api_base: default_api_base(),
+            api_base: "https://software.sayhey.top".into(),
             feedback_nickname: String::new(),
+            ai: AiSettings::default(),
         }
     }
 }
@@ -355,34 +317,12 @@ impl std::fmt::Debug for AiSettings {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PluginSettings {
-    pub screenshot: bool,
-    pub recorder: bool,
-    pub quickformater: bool,
-    pub ai: AiSettings,
-}
-
-impl PluginSettings {
-    pub fn allows(&self, action: &Action) -> bool {
-        match action {
-            Action::Screenshot => self.screenshot,
-            Action::RecordRegion => self.recorder,
-            Action::AiJyutping | Action::AiTranslate | Action::AiPolish => self.quickformater,
-            _ => true,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "version")]
     pub version: u32,
     #[serde(default)]
     pub settings: Settings,
-    #[serde(default)]
-    pub plugins: PluginSettings,
     #[serde(default)]
     pub profiles: Vec<Profile>,
 }
@@ -392,7 +332,6 @@ impl Default for Config {
         Self {
             version: version(),
             settings: Settings::default(),
-            plugins: PluginSettings::default(),
             profiles: vec![Profile {
                 id: "global".into(),
                 name: "Global".into(),
@@ -412,13 +351,30 @@ impl Config {
         }
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("读取配置失败: {}", path.display()))?;
-        let mut cfg: Config = toml::from_str(&text)
+        let mut cfg = Self::parse(&text)
             .with_context(|| format!("解析配置失败: {}", path.display()))?;
         if !cfg.profiles.iter().any(|p| p.is_global()) {
             cfg.profiles.insert(0, Profile { id: "global".into(), name: "Global".into(), exe: String::new(), gestures: vec![] });
         }
         cfg.migrate_legacy_builtins();
         Ok(cfg)
+    }
+
+    fn parse(text: &str) -> Result<Self> {
+        let mut config: toml::Table = toml::from_str(text)?;
+        // Keep AI credentials from older configs while dropping obsolete plugin switches.
+        if let Some(ai) = config
+            .remove("plugins")
+            .and_then(|mut plugins| plugins.as_table_mut()?.remove("ai"))
+        {
+            let settings = config
+                .entry("settings")
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            if let Some(settings) = settings.as_table_mut() {
+                settings.entry("ai").or_insert(ai);
+            }
+        }
+        Ok(config.try_into()?)
     }
 
     fn migrate_legacy_builtins(&mut self) {
@@ -459,7 +415,7 @@ impl Config {
         self.profiles
             .iter()
             .flat_map(|p| &p.gestures)
-            .filter(|g| g.enabled && self.plugins.allows(&g.action))
+            .filter(|g| g.enabled)
     }
 
     /// 边角滚轮手势用到的区域掩码，钩子只在这些区域接管滚轮
@@ -611,22 +567,22 @@ mod tests {
     fn default_config_roundtrips_through_toml() {
         let cfg = Config::default();
         let text = toml::to_string_pretty(&cfg).unwrap();
-        let back: Config = toml::from_str(&text).unwrap();
+        let back = Config::parse(&text).unwrap();
         assert_eq!(back.profiles.len(), 1);
         assert!(back.profiles[0].gestures.is_empty());
-        assert_eq!(back.plugins, PluginSettings::default());
+        assert_eq!(back.settings.ai, AiSettings::default());
         assert_eq!(back.settings.move_threshold, 20);
     }
 
     #[test]
     fn polish_notes_default_on_and_can_be_disabled_persistently() {
-        let cfg: Config = toml::from_str("[plugins.ai]\nmodel = 'custom'").unwrap();
-        assert!(cfg.plugins.ai.show_polish_notes);
-        let mut cfg = cfg;
-        cfg.plugins.ai.show_polish_notes = false;
-        let restored: Config = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
-        assert!(!restored.plugins.ai.show_polish_notes);
-        assert_eq!(restored.plugins.ai.model, "custom");
+        let old = Config::parse("[settings.ai]\nmodel = 'custom'").unwrap();
+        assert!(old.settings.ai.show_polish_notes);
+        let mut cfg = old;
+        cfg.settings.ai.show_polish_notes = false;
+        let restored = Config::parse(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert!(!restored.settings.ai.show_polish_notes);
+        assert_eq!(restored.settings.ai.model, "custom");
     }
 
     #[test]
@@ -731,20 +687,29 @@ mod tests {
     }
 
     #[test]
-    fn old_config_gets_plugin_defaults_and_partial_settings_roundtrip() {
-        let old: Config = toml::from_str("version = 1").unwrap();
-        assert_eq!(old.plugins, PluginSettings::default());
-        let cfg: Config = toml::from_str(r#"
+    fn legacy_plugin_settings_keep_ai_credentials_and_drop_switches() {
+        let cfg = Config::parse(r#"
             [plugins]
-            screenshot = true
+            screenshot = false
+            recorder = false
+            quickformater = false
             [plugins.ai]
+            base_url = "https://example.test/v1"
+            api_key = "test-key"
             model = "custom"
         "#).unwrap();
-        assert!(cfg.plugins.screenshot);
-        assert!(!cfg.plugins.recorder && !cfg.plugins.quickformater);
-        assert_eq!(cfg.plugins.ai.model, "custom");
-        let back: Config = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
-        assert_eq!(cfg.plugins, back.plugins);
+        assert_eq!(cfg.settings.ai.base_url, "https://example.test/v1");
+        assert_eq!(cfg.settings.ai.api_key, "test-key");
+        assert_eq!(cfg.settings.ai.model, "custom");
+        let text = toml::to_string(&cfg).unwrap();
+        assert!(!text.contains("[plugins"));
+        assert_eq!(Config::parse(&text).unwrap().settings.ai, cfg.settings.ai);
+    }
+
+    #[test]
+    fn explicit_ai_settings_take_precedence_over_legacy_settings() {
+        let cfg = Config::parse("[settings.ai]\n[plugins.ai]\napi_key = 'old-key'").unwrap();
+        assert_eq!(cfg.settings.ai, AiSettings::default());
     }
 
     #[test]

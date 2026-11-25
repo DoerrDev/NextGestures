@@ -27,7 +27,6 @@ import {
   emptyGesture,
   type Config,
   type Gesture,
-  type Plugins,
   type Profile,
   type Settings,
 } from './api'
@@ -193,9 +192,8 @@ export function App() {
       setActiveId(profile.id)
     })
 
-  const saveSettings = (settings: Settings, plugins: Plugins, pluginsChanged: boolean) =>
+  const saveSettings = (settings: Settings) =>
     void guard(async () => {
-      if (pluginsChanged) await api.setPlugins(plugins)
       await api.saveSettings(settings)
       setSettingsOpen(false)
       flash(t('saved'))
@@ -568,7 +566,6 @@ export function App() {
                 <GesturePane
                   key={`${editing.isNew ? 'new' : 'edit'}:${editing.gesture.id}`}
                   initial={editing.gesture}
-                  plugins={config.plugins}
                   isNew={editing.isNew}
                   onSave={saveGesture}
                   onClose={() => setEditing(null)}
@@ -730,7 +727,6 @@ export function App() {
       {settingsOpen && (
         <SettingsDialog
           initial={config.settings}
-          initialPlugins={config.plugins}
           unread={unread}
           configPath={configPath}
           onSave={saveSettings}
