@@ -203,6 +203,7 @@ const zhCN = {
   blacklistRemoved: '已移出黑名单，手势已恢复',
   blacklistSaving: '正在保存…',
   blacklistSidebarHint: '让指定应用使用自带手势',
+  docs: '说明文档',
   blacklistBlockApp: '停用此应用手势',
   blacklistRestore: '恢复此应用手势',
   blacklistBlocked: '此应用已停用手势',

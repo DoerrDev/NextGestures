@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { getVersion } from '@tauri-apps/api/app'
+import { isTauri } from '@tauri-apps/api/core'
 import { check, type Update } from '@tauri-apps/plugin-updater'
 import {
   AppWindow,
   Ban,
+  BookOpen,
   Copy,
+  ExternalLink,
   Globe,
   LayoutGrid,
   List,
@@ -38,6 +41,8 @@ import { SettingsDialog } from './components/SettingsDialog'
 import { BlacklistDialog } from './components/BlacklistDialog'
 import { StrokeCanvas } from './components/StrokeCanvas'
 import { VersionDialog } from './components/VersionDialog'
+
+const DOCS_URL = 'https://doerrdev.github.io/NG-Doc/'
 
 const TRIGGER_LABEL: Record<string, string> = {
   Right: '右键',
@@ -303,64 +308,83 @@ export function App() {
 
       <div className="board">
         <aside className="side">
-          <div className="side-label">{t('profiles')}</div>
-          {config.profiles.map((p, i) => (
-            <div
-              key={p.id}
-              role="button"
-              tabIndex={0}
-              className={[
-                'prof',
-                p.id === active.id ? 'active' : '',
-                p.exe ? '' : 'global',
-                i === 1 ? 'first-app' : '',
-              ]
-                .filter(Boolean)
-                .join(' ')}
-              onClick={() => {
-                setActiveId(p.id)
-                setEditing(null)
-              }}
-              onKeyDown={(e) => {
-                if (e.key !== 'Enter') return
-                setActiveId(p.id)
-                setEditing(null)
+          <div className="side-scroll">
+            <div className="side-label">{t('profiles')}</div>
+            {config.profiles.map((p, i) => (
+              <div
+                key={p.id}
+                role="button"
+                tabIndex={0}
+                className={[
+                  'prof',
+                  p.id === active.id ? 'active' : '',
+                  p.exe ? '' : 'global',
+                  i === 1 ? 'first-app' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+                onClick={() => {
+                  setActiveId(p.id)
+                  setEditing(null)
+                }}
+                onKeyDown={(e) => {
+                  if (e.key !== 'Enter') return
+                  setActiveId(p.id)
+                  setEditing(null)
+                }}
+              >
+                {p.exe ? (
+                  <AppWindow size={15} strokeWidth={2} className="prof-icon" />
+                ) : (
+                  <Globe size={15} strokeWidth={2} className="prof-icon" />
+                )}
+                <span>{p.exe ? p.name : t('global')}</span>
+                {isBlacklisted(p.exe) && <Ban size={14} className="prof-icon" aria-label={t('blacklistBlocked')} />}
+                <small>{p.gestures.length}</small>
+                {p.exe && (
+                  <button
+                    type="button"
+                    className="btn-icon prof-del"
+                    title={t('removeProfile')}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setConfirmRemove(p)
+                    }}
+                  >
+                    <Trash2 size={14} strokeWidth={2} />
+                  </button>
+                )}
+              </div>
+            ))}
+            <button type="button" className="prof add" onClick={() => setProfileOpen(true)}>
+              <Plus size={15} strokeWidth={2} />
+              {t('addProfile')}
+            </button>
+            <div className="side-blacklist">
+              <button type="button" className="prof" onClick={() => setBlacklistOpen(true)}>
+                <Ban size={16} className="prof-icon" />
+                <span>{t('tabBlacklist')}</span>
+                <small>{blacklist.length}</small>
+              </button>
+              <p>{t('blacklistSidebarHint')}</p>
+            </div>
+          </div>
+          <div className="side-foot">
+            <a
+              className="prof side-docs"
+              href={DOCS_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(event) => {
+                if (!isTauri()) return
+                event.preventDefault()
+                void api.testAction({ kind: 'open_url', url: DOCS_URL }).catch((error) => flash(String(error)))
               }}
             >
-              {p.exe ? (
-                <AppWindow size={15} strokeWidth={2} className="prof-icon" />
-              ) : (
-                <Globe size={15} strokeWidth={2} className="prof-icon" />
-              )}
-              <span>{p.exe ? p.name : t('global')}</span>
-              {isBlacklisted(p.exe) && <Ban size={14} className="prof-icon" aria-label={t('blacklistBlocked')} />}
-              <small>{p.gestures.length}</small>
-              {p.exe && (
-                <button
-                  type="button"
-                  className="btn-icon prof-del"
-                  title={t('removeProfile')}
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    setConfirmRemove(p)
-                  }}
-                >
-                  <Trash2 size={14} strokeWidth={2} />
-                </button>
-              )}
-            </div>
-          ))}
-          <button type="button" className="prof add" onClick={() => setProfileOpen(true)}>
-            <Plus size={15} strokeWidth={2} />
-            {t('addProfile')}
-          </button>
-          <div className="side-blacklist">
-            <button type="button" className="prof" onClick={() => setBlacklistOpen(true)}>
-              <Ban size={16} className="prof-icon" />
-              <span>{t('tabBlacklist')}</span>
-              <small>{blacklist.length}</small>
-            </button>
-            <p>{t('blacklistSidebarHint')}</p>
+              <BookOpen size={16} className="prof-icon" aria-hidden="true" />
+              <span>{t('docs')}</span>
+              <ExternalLink size={13} className="prof-icon side-docs-external" aria-hidden="true" />
+            </a>
           </div>
         </aside>
 

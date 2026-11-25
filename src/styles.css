@@ -807,9 +807,21 @@ textarea {
 .side {
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  gap: var(--spacing-8);
+}
+
+.side-scroll {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   gap: var(--spacing-8);
   overflow-y: auto;
   padding-right: 6px;
+}
+
+.side-scroll > * {
+  flex-shrink: 0;
 }
 
 .side-label {
@@ -908,8 +920,29 @@ textarea {
 }
 
 .side-foot {
+  flex: none;
   margin-top: auto;
   padding-top: var(--spacing-16);
+  padding-right: 6px;
+}
+
+.side-docs {
+  background: var(--color-chalk-gray);
+  text-decoration: none;
+}
+
+.side-docs-external {
+  opacity: 0.65;
+}
+
+.side-docs:hover,
+.side-docs:focus-visible {
+  background: var(--color-ice-wash);
+}
+
+.side-docs:focus-visible {
+  outline: 2px solid var(--color-charcoal-ink);
+  outline-offset: 2px;
 }
 
 .main {
