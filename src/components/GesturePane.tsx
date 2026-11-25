@@ -2,56 +2,80 @@ import { useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import {
   Check,
+  Circle,
   Copy,
-  MousePointerClick,
+  Keyboard,
   Power,
   PowerOff,
   RotateCcw,
+  Spline,
   Trash2,
+  TriangleAlert,
   X,
 } from 'lucide-react'
 import {
   api,
+  DOCS_GESTURE_URL,
+  DOCS_URL,
+  hotkeyLabel,
+  isHotkeyOnly,
+  openExternal,
   REGIONS,
   TRIGGERS,
-  type FireMode,
   type Gesture,
   type LivePayload,
   type Point,
   type RecordedPayload,
   type TriggerButton,
 } from '../api'
-import { t } from '../i18n'
+import { t, type Key } from '../i18n'
 import { ActionEditor } from './ActionEditor'
+import { HotkeyRecorder } from './HotkeyRecorder'
 import { StrokeCanvas } from './StrokeCanvas'
 
 interface Props {
   initial: Gesture
   isNew: boolean
-  onSave: (gesture: Gesture) => void
+  /** 保存失败时 reject，错误文案显示在面板内 */
+  onSave: (gesture: Gesture) => Promise<void>
   onClose: () => void
   onToggle: (gesture: Gesture) => void
   onDelete: (gesture: Gesture) => void
   /** 以当前面板内容为模板新建手势 */
   onDuplicate: (gesture: Gesture) => void
+  /** 被其他程序占用、注册失败的快捷键标签 */
+  hotkeyFailures: string[]
 }
 
-const TRIGGER_LABEL: Record<string, string> = {
-  Right: '鼠标右键',
-  Middle: '鼠标中键',
-  X1: '侧键 1',
-  X2: '侧键 2',
+const BUTTON_LABEL: Record<TriggerButton, Key> = {
+  Right: 'btnRight',
+  Middle: 'btnMiddle',
+  X1: 'btnX1',
+  X2: 'btnX2',
 }
 
 /** 选了屏幕边角后的触发方式：滚轮需要录制，单击 / 停留直接配置 */
 type EdgeMode = 'wheel' | 'dwell' | `click:${TriggerButton}`
+type TriggerTab = 'mouse' | 'hotkey'
 
 const DEFAULT_DWELL_MS = 600
 
-export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelete, onDuplicate }: Props) {
-  const [draft, setDraft] = useState<Gesture>(initial)
+export function GesturePane({
+  initial,
+  isNew,
+  onSave,
+  onClose,
+  onToggle,
+  onDelete,
+  onDuplicate,
+  hotkeyFailures,
+}: Props) {
+  const [draft, setDraft] = useState<Gesture>(() => ({ ...initial, hotkey: initial.hotkey ?? [] }))
+  const [tab, setTab] = useState<TriggerTab>(() => (isHotkeyOnly(initial) ? 'hotkey' : 'mouse'))
   const [recording, setRecording] = useState(false)
   const [sequenceRecording, setSequenceRecording] = useState(false)
+  const [keyRecording, setKeyRecording] = useState(false)
+  const [saving, setSaving] = useState(false)
   const [live, setLive] = useState<LivePayload | null>(null)
   const [error, setError] = useState('')
   const liveRef = useRef<LivePayload | null>(null)
@@ -110,6 +134,8 @@ export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelet
     }
   }, [])
 
+  const busy = recording || sequenceRecording || keyRecording
+
   const startRecord = async () => {
     setError('')
     liveRef.current = null
@@ -123,11 +149,39 @@ export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelet
     }
   }
 
+  const cancelRecord = () => {
+    setRecording(false)
+    liveRef.current = null
+    setLive(null)
+    void api.cancelRecording()
+  }
+
+  const clearMouse = () => {
+    setError('')
+    setDraft({
+      ...draft,
+      trigger: draft.trigger ?? 'Right',
+      region: null,
+      wheel: [],
+      left_click: false,
+      dwell_ms: 0,
+      points: [],
+      times: [],
+    })
+  }
+
+  const hotkey = draft.hotkey ?? []
+  const hotkeySet = hotkey.length > 0
   const recorded = draft.points.length > 0 || draft.wheel.length > 0
   const edgeMode: EdgeMode = draft.dwell_ms > 0 ? 'dwell' : draft.trigger ? `click:${draft.trigger}` : 'wheel'
   /** 边角单击 / 停留不需要录制，也没有「画到就执行」的区别 */
   const edgeNoRecord = !!draft.region && edgeMode !== 'wheel'
-  const onReleaseOnly = draft.left_click || edgeNoRecord || ['screenshot', 'record_region', 'ai_jyutping', 'ai_translate', 'ai_polish'].includes(draft.action.kind)
+  const mouseSet = recorded || edgeNoRecord
+  const onReleaseOnly =
+    draft.left_click ||
+    edgeNoRecord ||
+    ['screenshot', 'record_region', 'ai_jyutping', 'ai_translate', 'ai_polish'].includes(draft.action.kind)
+  const hotkeyBusy = hotkeySet && hotkeyFailures.includes(hotkeyLabel(hotkey))
 
   const setEdgeMode = (mode: EdgeMode) => {
     const cleared = { ...draft, wheel: [], points: [], times: [], left_click: false }
@@ -136,161 +190,307 @@ export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelet
     else setDraft({ ...cleared, trigger: mode.slice(6) as TriggerButton, dwell_ms: 0 })
   }
 
-  const submit = () => {
-    if (!draft.name.trim()) return setError(t('needName'))
-    if (draft.action.kind === 'launch_app' && !draft.action.app_id) return setError(t('needInstalledApp'))
-    if (!edgeNoRecord && draft.points.length === 0 && draft.wheel.length === 0) return setError(t('needStroke'))
-    if (!draft.trigger && !draft.region) return setError(t('needTrigger'))
-    if (draft.region && draft.points.length > 0) return setError(t('regionWheelOnly'))
-    if (draft.region && edgeMode === 'dwell' && !(draft.dwell_ms >= 100 && draft.dwell_ms <= 10000))
-      return setError(t('dwellRange'))
-    onSave({ ...draft, name: draft.name.trim(), dwell_ms: draft.region ? draft.dwell_ms : 0 })
+  const pickButton = (b: TriggerButton) =>
+    setDraft({ ...draft, trigger: b, region: null, dwell_ms: 0, left_click: b === 'Right' && draft.left_click })
+
+  const pickRegion = (v: string) => {
+    if (!v) {
+      setDraft({ ...draft, trigger: draft.trigger ?? 'Right', region: null, dwell_ms: 0 })
+      return
+    }
+    const region = v as NonNullable<Gesture['region']>
+    setDraft(
+      draft.region
+        ? { ...draft, region } // 换个边角，保留原来的边角动作
+        : { ...draft, trigger: null, region, left_click: false, dwell_ms: 0 },
+    )
   }
+
+  const submit = async () => {
+    const name = draft.name.trim()
+    if (!name) return setError(t('needName'))
+    if (draft.action.kind === 'launch_app' && !draft.action.app_id) return setError(t('needInstalledApp'))
+    if (!mouseSet && !hotkeySet) return setError(t('needAnyTrigger'))
+
+    let out: Gesture
+    if (mouseSet) {
+      if (!draft.trigger && !draft.region) return setError(t('needTrigger'))
+      if (draft.region && draft.points.length > 0) return setError(t('regionWheelOnly'))
+      if (draft.region && edgeMode === 'dwell' && !(draft.dwell_ms >= 100 && draft.dwell_ms <= 10000))
+        return setError(t('dwellRange'))
+      out = { ...draft, name, hotkey, dwell_ms: draft.region ? draft.dwell_ms : 0 }
+    } else {
+      // 只有快捷键：清空鼠标触发，与后端约定一致
+      out = {
+        ...draft,
+        name,
+        hotkey,
+        trigger: null,
+        region: null,
+        wheel: [],
+        left_click: false,
+        dwell_ms: 0,
+        points: [],
+        times: [],
+      }
+    }
+
+    setError('')
+    setSaving(true)
+    try {
+      await onSave(out)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const docLink = (label: Key, url: string) => (
+    <button
+      type="button"
+      className="link-inline"
+      onClick={() => void openExternal(url).catch((e) => setError(String(e)))}
+    >
+      {t(label)}
+    </button>
+  )
+
+  const status = (set: boolean, label: Key) => (
+    <span className={set ? 'tab-status' : 'tab-status none'}>{set ? t(label) : t('stUnset')}</span>
+  )
 
   return (
     <aside className="pane">
       <div className="pane-head">
-        <h2>{isNew ? t('addGesture') : draft.name || t('editGesture')}</h2>
+        <input
+          className="pane-name"
+          type="text"
+          value={draft.name}
+          aria-label={t('name')}
+          placeholder={isNew ? t('untitled') : t('namePlaceholder')}
+          autoFocus={isNew}
+          onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+          onKeyDown={(e) => e.key === 'Enter' && !busy && !saving && void submit()}
+        />
         <button type="button" className="btn-icon" onClick={onClose} title={t('cancel')}>
           <X size={16} strokeWidth={2} />
         </button>
       </div>
 
       <div className="pane-body">
-        <div className={recording ? 'recorder live' : 'recorder'}>
-          {live ? (
-            <StrokeCanvas
-              className="frame"
-              points={live.points}
-              trigger={live.trigger}
-              leftClick={live.left_click}
-              live
-              region={live.region}
-              wheel={live.wheel}
-              color="#6fc2ff"
-            />
-          ) : (
-            <StrokeCanvas
-              className="frame"
-              points={draft.points}
-              trigger={draft.trigger}
-              leftClick={draft.left_click}
-              times={draft.times}
-              region={draft.region}
-              wheel={draft.wheel}
-              color="#6fc2ff"
-            />
-          )}
-          <p className="hint">{recording ? t('recording') : edgeNoRecord ? t('edgeNoRecordHint') : t('recordHint')}</p>
-          <button type="button" className="btn-outline" onClick={startRecord} disabled={recording || sequenceRecording}>
-            {recorded || edgeNoRecord ? (
-              <RotateCcw size={16} strokeWidth={2} />
-            ) : (
-              <MousePointerClick size={16} strokeWidth={2} />
-            )}
-            {recorded || edgeNoRecord ? t('reRecord') : t('record')}
-          </button>
-        </div>
-
-        <div className="field">
-          <label htmlFor="g-name">{t('name')}</label>
-          <input
-            id="g-name"
-            type="text"
-            value={draft.name}
-            placeholder={t('namePlaceholder')}
-            onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-          />
-        </div>
-
-        <div className="row field">
-          <div>
-            <label htmlFor="g-trigger">{t('trigger')}</label>
-            <select
-              id="g-trigger"
-              value={draft.region ? `region:${draft.region}` : draft.trigger ?? ''}
-              onChange={(e) => {
-                const v = e.target.value
-                const region = v.startsWith('region:') ? (v.slice(7) as Gesture['region']) : null
-                setDraft(
-                  region
-                    ? draft.region
-                      ? { ...draft, region } // 换个边角，保留原来的边角动作
-                      : { ...draft, trigger: null, region, left_click: false, dwell_ms: 0 }
-                    : { ...draft, trigger: v as Gesture['trigger'], region: null, dwell_ms: 0, left_click: v === 'Right' && draft.left_click },
-                )
-              }}
+        <div className="trig">
+          <div className="trig-tabs" role="tablist">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === 'mouse'}
+              className={tab === 'mouse' ? 'on' : ''}
+              disabled={busy && tab !== 'mouse'}
+              onClick={() => setTab('mouse')}
             >
-              {TRIGGERS.map((b) => (
-                <option key={b} value={b}>
-                  {TRIGGER_LABEL[b]}
-                </option>
-              ))}
-              {REGIONS.map((r) => (
-                <option key={r} value={`region:${r}`}>
-                  {t(`region${r}`)}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label htmlFor="g-fire">{t('fireMode')}</label>
-            <select
-              id="g-fire"
-              value={onReleaseOnly ? 'OnRelease' : draft.fire_mode}
-              disabled={onReleaseOnly}
-              onChange={(e) => setDraft({ ...draft, fire_mode: e.target.value as FireMode })}
+              <Spline size={15} strokeWidth={2} />
+              {t('tabMouse')}
+              {status(mouseSet, 'stRecorded')}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === 'hotkey'}
+              className={tab === 'hotkey' ? 'on' : ''}
+              disabled={busy && tab !== 'hotkey'}
+              onClick={() => setTab('hotkey')}
             >
-              <option value="OnRelease">{t('onRelease')}</option>
-              <option value="Immediate">{t('immediate')}</option>
-            </select>
-            {draft.left_click && (
-              <p className="field-note" style={{ marginTop: 6 }}>
-                {t('leftClickFireNote')}
-              </p>
-            )}
+              <Keyboard size={15} strokeWidth={2} />
+              {t('tabHotkey')}
+              {status(hotkeySet, 'stSet')}
+            </button>
           </div>
-        </div>
 
-        {draft.region && (
-          <div className="row field">
-            <div>
-              <label htmlFor="g-edge">{t('edgeMode')}</label>
-              <select id="g-edge" value={edgeMode} onChange={(e) => setEdgeMode(e.target.value as EdgeMode)}>
-                <option value="wheel">{t('edgeWheel')}</option>
-                {TRIGGERS.map((b) => (
-                  <option key={b} value={`click:${b}`}>
-                    {t(`edgeClick${b}`)}
-                  </option>
-                ))}
-                <option value="dwell">{t('edgeDwell')}</option>
-              </select>
-            </div>
-            <div>
-              {edgeMode === 'dwell' && (
-                <>
-                  <label htmlFor="g-dwell">{t('dwellMs')}</label>
-                  <input
-                    id="g-dwell"
-                    type="number"
-                    min={100}
-                    max={10000}
-                    step={50}
-                    value={draft.dwell_ms}
-                    onChange={(e) => setDraft({ ...draft, dwell_ms: Math.round(Number(e.target.value)) || 0 })}
+          {tab === 'mouse' ? (
+            <div className="trig-body" role="tabpanel">
+              <div className={recording ? 'trig-stage live' : 'trig-stage'}>
+                {live ? (
+                  <StrokeCanvas
+                    className="trig-canvas"
+                    points={live.points}
+                    trigger={live.trigger}
+                    leftClick={live.left_click}
+                    live
+                    region={live.region}
+                    wheel={live.wheel}
+                    color="#6fc2ff"
                   />
-                </>
-              )}
-            </div>
-          </div>
-        )}
+                ) : mouseSet || draft.region ? (
+                  <StrokeCanvas
+                    className="trig-canvas"
+                    points={draft.points}
+                    trigger={draft.trigger}
+                    leftClick={draft.left_click}
+                    times={draft.times}
+                    region={draft.region}
+                    wheel={draft.wheel}
+                    color="#6fc2ff"
+                  />
+                ) : recording ? null : (
+                  <span className="trig-stage-empty">
+                    {t('noStrokeYet')}
+                    <br />
+                    {t('noStrokeYetHint')}
+                  </span>
+                )}
+                <span className="trig-stage-acts">
+                  {recording ? (
+                    <button type="button" className="btn-outline btn-xs" onClick={cancelRecord}>
+                      <X size={13} strokeWidth={2} />
+                      {t('cancel')}
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        className={mouseSet ? 'btn-outline btn-xs' : 'btn-primary btn-xs'}
+                        onClick={startRecord}
+                        disabled={busy}
+                      >
+                        {mouseSet ? <RotateCcw size={13} strokeWidth={2} /> : <Circle size={11} strokeWidth={3} />}
+                        {mouseSet ? t('reRecord') : t('record')}
+                      </button>
+                      {(mouseSet || draft.region) && (
+                        <button type="button" className="btn-outline btn-xs" onClick={clearMouse} disabled={busy}>
+                          {t('clearKeys')}
+                        </button>
+                      )}
+                    </>
+                  )}
+                </span>
+              </div>
+              {recording && <p className="hint">{t('recording')}</p>}
 
-        <h3 className="pane-sect">{t('action')}</h3>
+              <div className="fld">
+                <span className="lbl">{t('trigger')}</span>
+                <div className="chips">
+                  {TRIGGERS.map((b) => (
+                    <button
+                      key={b}
+                      type="button"
+                      className={!draft.region && draft.trigger === b ? 'chip on' : 'chip'}
+                      aria-pressed={!draft.region && draft.trigger === b}
+                      onClick={() => pickButton(b)}
+                    >
+                      {t(BUTTON_LABEL[b])}
+                    </button>
+                  ))}
+                  <select
+                    className={draft.region ? 'chip chip-select on' : 'chip chip-select'}
+                    aria-label={t('screenEdge')}
+                    value={draft.region ?? ''}
+                    onChange={(e) => pickRegion(e.target.value)}
+                  >
+                    <option value="">{t('screenEdge')} ▾</option>
+                    {REGIONS.map((r) => (
+                      <option key={r} value={r}>
+                        {t(`region${r}`)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {draft.region && (
+                <div className="fld-row">
+                  <div className="fld">
+                    <label className="lbl" htmlFor="g-edge">
+                      {t('edgeMode')}
+                    </label>
+                    <select id="g-edge" value={edgeMode} onChange={(e) => setEdgeMode(e.target.value as EdgeMode)}>
+                      <option value="wheel">{t('edgeWheel')}</option>
+                      {TRIGGERS.map((b) => (
+                        <option key={b} value={`click:${b}`}>
+                          {t(`edgeClick${b}`)}
+                        </option>
+                      ))}
+                      <option value="dwell">{t('edgeDwell')}</option>
+                    </select>
+                  </div>
+                  {edgeMode === 'dwell' && (
+                    <div className="fld">
+                      <label className="lbl" htmlFor="g-dwell">
+                        {t('dwellMs')}
+                      </label>
+                      <input
+                        id="g-dwell"
+                        type="number"
+                        min={100}
+                        max={10000}
+                        step={50}
+                        value={draft.dwell_ms}
+                        onChange={(e) => setDraft({ ...draft, dwell_ms: Math.round(Number(e.target.value)) || 0 })}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="fld">
+                <span className="lbl">{t('fireMode')}</span>
+                <div className="chips">
+                  {(['OnRelease', 'Immediate'] as const).map((mode) => {
+                    const on = (onReleaseOnly ? 'OnRelease' : draft.fire_mode) === mode
+                    return (
+                      <button
+                        key={mode}
+                        type="button"
+                        className={on ? 'chip on' : 'chip'}
+                        aria-pressed={on}
+                        title={mode === 'OnRelease' ? t('onRelease') : t('immediate')}
+                        disabled={onReleaseOnly && mode === 'Immediate'}
+                        onClick={() => setDraft({ ...draft, fire_mode: mode })}
+                      >
+                        {mode === 'OnRelease' ? t('onReleaseShort') : t('immediateShort')}
+                      </button>
+                    )
+                  })}
+                </div>
+                {draft.left_click && <p className="hint">{t('leftClickFireNote')}</p>}
+              </div>
+
+              <p className="hint">
+                {edgeNoRecord ? t('edgeNoRecordHint') : t('recordHintShort')} {docLink('gestureGuide', DOCS_GESTURE_URL)}
+              </p>
+            </div>
+          ) : (
+            <div className="trig-body" role="tabpanel">
+              <HotkeyRecorder
+                variant="stage"
+                keys={hotkey}
+                onChange={(keys) => {
+                  setError('')
+                  setDraft((d) => ({ ...d, hotkey: keys }))
+                }}
+                onRecordingChange={setKeyRecording}
+                disabled={busy}
+              />
+              {hotkeyBusy && (
+                <p className="pane-banner" role="alert">
+                  <TriangleAlert size={14} strokeWidth={2} />
+                  {t('hotkeyBusy')}
+                </p>
+              )}
+              <p className="hint">
+                {t('hotkeyTriggerHint')} {docLink('hotkeyGuide', DOCS_URL)}
+              </p>
+            </div>
+          )}
+        </div>
+
+        <div className="pane-sect-line">{t('actionShared')}</div>
         <ActionEditor
           action={draft.action}
           onChange={(action) => setDraft((current) => ({ ...current, action }))}
           onError={setError}
           onRecordingChange={setSequenceRecording}
+          recordDisabled={busy}
         />
 
         {error && <p className="error pane-error">{error}</p>}
@@ -321,7 +521,7 @@ export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelet
             <button
               type="button"
               className="btn-ghost"
-              disabled={sequenceRecording}
+              disabled={busy}
               title={t('duplicate')}
               onClick={() => onDuplicate({ ...draft, name: draft.name.trim() })}
             >
@@ -331,11 +531,20 @@ export function GesturePane({ initial, isNew, onSave, onClose, onToggle, onDelet
           </>
         )}
         <span className="grow" />
-        <button type="button" className="btn-primary btn-sm" onClick={submit} disabled={sequenceRecording}>
+        <button type="button" className="btn-primary btn-sm" onClick={() => void submit()} disabled={busy || saving}>
           <Check size={15} strokeWidth={2} />
           {t('save')}
         </button>
       </div>
     </aside>
+  )
+}
+
+/** 列表 / 卡片里只有快捷键的手势，用键盘图标代替轨迹缩略图 */
+export function HotkeyThumb({ className }: { className: string }) {
+  return (
+    <span className={`${className} kb-thumb`} role="img" aria-label={t('hotkeyOnly')}>
+      <Keyboard size={22} strokeWidth={1.8} />
+    </span>
   )
 }

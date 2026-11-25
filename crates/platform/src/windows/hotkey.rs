@@ -70,6 +70,7 @@ enum Update {
 static THREAD: OnceLock<u32> = OnceLock::new();
 static UPDATES: Mutex<Vec<Update>> = Mutex::new(Vec::new());
 static REPLAYS: AtomicUsize = AtomicUsize::new(0);
+static FAILURES: Mutex<Vec<(Chord, String)>> = Mutex::new(Vec::new());
 
 pub struct ReplayGuard;
 
@@ -159,6 +160,7 @@ fn apply(
     strict: bool,
 ) -> Result<()> {
     let mut added = Vec::new();
+    let mut failed = Vec::new();
     for (chord, label) in &bindings {
         if active.contains_key(chord) {
             continue;
@@ -172,7 +174,9 @@ fn apply(
             unsafe { RegisterHotKey(None, id, HOT_KEY_MODIFIERS(chord.0) | MOD_NOREPEAT, chord.1) };
         if let Err(error) = result {
             let message = format!("快捷键 {label} 注册失败，可能已被系统或其他程序占用（{error}）");
-            if strict {
+            // 之前就注册不上的组合键已经在界面上提示过，不阻止用户修改别的快捷键
+            let known = FAILURES.lock().unwrap().iter().any(|(c, _)| c == chord);
+            if strict && !known {
                 for added_chord in added {
                     if let Some(id) = active.remove(&added_chord) {
                         unregister(id);
@@ -181,6 +185,7 @@ fn apply(
                 bail!("{message}");
             }
             log::warn!("{message}");
+            failed.push((*chord, label.clone()));
         } else {
             active.insert(*chord, id);
             added.push(*chord);
@@ -193,7 +198,13 @@ fn apply(
         unregister(*id);
         false
     });
+    *FAILURES.lock().unwrap() = failed;
     Ok(())
+}
+
+/// 最近一次注册时被系统或其他程序占用的快捷键（显示文本）
+pub fn failures() -> Vec<String> {
+    FAILURES.lock().unwrap().iter().map(|(_, label)| label.clone()).collect()
 }
 
 #[cfg(test)]

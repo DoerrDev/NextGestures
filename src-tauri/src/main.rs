@@ -55,13 +55,13 @@ fn main() {
             commands::get_config,
             commands::config_path,
             commands::save_settings,
-            commands::save_blacklist,
-            commands::save_shortcuts,
             commands::upsert_gesture,
             commands::remove_gesture,
             commands::set_gesture_enabled,
             commands::upsert_profile,
             commands::remove_profile,
+            commands::set_profile_passthrough,
+            commands::hotkey_failures,
             commands::start_recording,
             commands::cancel_recording,
             commands::begin_pick,
@@ -145,13 +145,12 @@ fn dispatch_shortcut(app: &AppHandle, chord: hotkey::Chord) {
         let _ = app.run_on_main_thread(move || set_enabled(&handle, !hook::is_enabled()));
         return;
     }
-    if config.settings.is_blacklisted(&window::foreground_exe()) {
-        return;
-    }
-    let Some(shortcut) = config.shortcuts.iter().find(|shortcut| {
-        hotkey::Chord::parse(&shortcut.keys).ok() == Some(chord)
+    // 前台程序的配置组优先，其次 Global；「交给程序自带手势」的程序里不响应
+    let exe = window::foreground_exe();
+    let Some(hit) = gesture_core::matcher::hotkey_gesture(&config, &exe, |keys| {
+        hotkey::Chord::parse(keys).ok() == Some(chord)
     }) else { return };
-    let action = shortcut.action.clone();
+    let action = hit.gesture.action.clone();
     drop(config);
     action::spawn_from_shortcut(app.clone(), action, chord);
 }

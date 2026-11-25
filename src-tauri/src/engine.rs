@@ -449,7 +449,7 @@ fn to_input<'a>(
     matcher::Input { button, region, wheel, left_click, dwell: false, stroke: norm }
 }
 
-/// 鼠标进入边角：有停留手势才开始计时；全屏、暂停、黑名单、录制时不触发
+/// 鼠标进入边角：有停留手势才开始计时；全屏、暂停、直通程序、录制时不触发
 fn enter_edge(app: &AppHandle, region: Region) -> Option<Hover> {
     if recording(app) || !hook::is_enabled() || window::foreground_fullscreen() {
         return None;
@@ -457,7 +457,7 @@ fn enter_edge(app: &AppHandle, region: Region) -> Option<Hover> {
     let exe = window::foreground_exe();
     let state = app.state::<AppState>();
     let cfg = state.config.read().unwrap();
-    if cfg.settings.is_blacklisted(&exe) {
+    if cfg.is_passthrough(&exe) {
         return None;
     }
     let ms = dwell_gesture(&cfg, &exe, region)?.gesture.dwell_ms;

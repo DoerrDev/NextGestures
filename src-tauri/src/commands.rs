@@ -1,8 +1,9 @@
 use std::sync::atomic::Ordering::Relaxed;
 
-use gesture_core::{Action, Config, Gesture, KeySequenceEvent, Profile, Settings, Shortcut};
+use anyhow::Context;
+use gesture_core::{Action, Config, Gesture, KeySequenceEvent, Profile, Settings};
 use gesture_platform::keyrec::{self, KeyRecEvent};
-use gesture_platform::{hook, shell, window};
+use gesture_platform::{hook, hotkey, shell, window};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -70,97 +71,100 @@ pub fn config_path(state: State<AppState>) -> String {
     state.path.display().to_string()
 }
 
+/// 改动配置：快捷键受影响时先重新注册，失败则回滚，成功后落盘并同步钩子
+fn update(state: &AppState, f: impl FnOnce(&mut Config) -> anyhow::Result<()>) -> R<()> {
+    state.update(f).map_err(|e| format!("{e:#}"))
+}
+
 #[tauri::command]
-pub fn save_settings(app: AppHandle, state: State<AppState>, mut settings: Settings) -> R<()> {
-    state.update_shortcuts(|cfg| {
-        // 黑名单独立即时保存，避免旧设置快照把名单覆盖回去。
-        settings.blacklist = cfg.settings.blacklist.clone();
+pub fn save_settings(app: AppHandle, state: State<AppState>, settings: Settings) -> R<()> {
+    update(&state, |cfg| {
         cfg.settings = settings;
-    }).map_err(err)?;
+        Ok(())
+    })?;
     // 「触发提示置顶」立即生效，不必等下一次手势
     let _ = crate::overlay::apply_z_order(&app);
     Ok(())
 }
 
 #[tauri::command]
-pub fn save_shortcuts(state: State<AppState>, shortcuts: Vec<Shortcut>) -> R<()> {
-    if shortcuts.iter().any(|shortcut| matches!(shortcut.action, Action::None)) {
-        return Err("请为每个快捷键选择一个动作".into());
-    }
-    state.update_shortcuts(|cfg| cfg.shortcuts = shortcuts).map_err(err)
+pub fn upsert_gesture(state: State<AppState>, profile_id: String, gesture: Gesture) -> R<()> {
+    update(&state, |cfg| cfg.upsert_gesture(&profile_id, gesture))
 }
 
 #[tauri::command]
-pub fn save_blacklist(app: AppHandle, state: State<AppState>, names: Vec<String>) -> R<()> {
-    state.config.write().unwrap().settings.set_blacklist(names).map_err(err)?;
-    commit(&app)?;
-    app.emit("config:changed", ()).map_err(err)
-}
-
-#[tauri::command]
-pub fn upsert_gesture(
-    app: AppHandle,
-    state: State<AppState>,
-    profile_id: String,
-    gesture: Gesture,
-) -> R<()> {
-    state.config.write().unwrap().upsert_gesture(&profile_id, gesture).map_err(err)?;
-    commit(&app)
-}
-
-#[tauri::command]
-pub fn remove_gesture(
-    app: AppHandle,
-    state: State<AppState>,
-    profile_id: String,
-    gesture_id: String,
-) -> R<()> {
-    state.config.write().unwrap().remove_gesture(&profile_id, &gesture_id).map_err(err)?;
-    commit(&app)
+pub fn remove_gesture(state: State<AppState>, profile_id: String, gesture_id: String) -> R<()> {
+    update(&state, |cfg| cfg.remove_gesture(&profile_id, &gesture_id))
 }
 
 #[tauri::command]
 pub fn set_gesture_enabled(
-    app: AppHandle,
     state: State<AppState>,
     profile_id: String,
     gesture_id: String,
     enabled: bool,
 ) -> R<()> {
-    {
-        let mut cfg = state.config.write().unwrap();
-        let profile = cfg.profile_mut(&profile_id).ok_or("未找到配置组")?;
-        let g = profile.gestures.iter_mut().find(|g| g.id == gesture_id).ok_or("未找到手势")?;
+    update(&state, |cfg| {
+        let profile = cfg.profile_mut(&profile_id).context("未找到配置组")?;
+        let g = profile.gestures.iter_mut().find(|g| g.id == gesture_id).context("未找到手势")?;
         g.enabled = enabled;
-    }
-    commit(&app)
+        Ok(())
+    })
 }
 
 #[tauri::command]
-pub fn upsert_profile(app: AppHandle, state: State<AppState>, profile: Profile) -> R<()> {
-    {
-        let mut cfg = state.config.write().unwrap();
+pub fn upsert_profile(state: State<AppState>, profile: Profile) -> R<()> {
+    update(&state, |cfg| {
+        anyhow::ensure!(!(profile.passthrough && profile.is_global()), "Global 配置组不能交给程序自带手势");
         match cfg.profiles.iter_mut().find(|p| p.id == profile.id) {
             Some(slot) => {
+                anyhow::ensure!(
+                    !slot.is_global() || profile.is_global(),
+                    "Global 配置组不能指定程序"
+                );
                 slot.name = profile.name;
                 slot.exe = profile.exe;
+                slot.passthrough = profile.passthrough;
             }
             None => cfg.profiles.push(profile),
         }
-    }
-    commit(&app)
+        Ok(())
+    })
 }
 
 #[tauri::command]
-pub fn remove_profile(app: AppHandle, state: State<AppState>, profile_id: String) -> R<()> {
-    {
-        let mut cfg = state.config.write().unwrap();
-        if cfg.profiles.iter().any(|p| p.id == profile_id && p.is_global()) {
-            return Err("Global 配置组不能删除".into());
-        }
+pub fn remove_profile(state: State<AppState>, profile_id: String) -> R<()> {
+    update(&state, |cfg| {
+        anyhow::ensure!(
+            !cfg.profiles.iter().any(|p| p.id == profile_id && p.is_global()),
+            "Global 配置组不能删除"
+        );
         cfg.profiles.retain(|p| p.id != profile_id);
-    }
-    commit(&app)
+        Ok(())
+    })
+}
+
+/// 在该配置组对应的程序里交给程序自带手势（NextGestures 完全不拦截）
+#[tauri::command]
+pub fn set_profile_passthrough(
+    app: AppHandle,
+    state: State<AppState>,
+    profile_id: String,
+    passthrough: bool,
+) -> R<()> {
+    update(&state, |cfg| {
+        let profile = cfg.profile_mut(&profile_id).context("未找到配置组")?;
+        anyhow::ensure!(!(passthrough && profile.is_global()), "Global 配置组不能交给程序自带手势");
+        profile.passthrough = passthrough;
+        Ok(())
+    })?;
+    app.emit("config:changed", ()).map_err(err)
+}
+
+/// 最近一次注册时被系统或其他程序占用的快捷键（`keys.join(" + ")`）
+#[tauri::command]
+pub fn hotkey_failures() -> Vec<String> {
+    hotkey::failures()
 }
 
 /// 录制期间放开全部触发键，方便用户用任意键录

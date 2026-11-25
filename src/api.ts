@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { invoke, isTauri } from '@tauri-apps/api/core'
 
 export type TriggerButton = 'Right' | 'Middle' | 'X1' | 'X2'
 export type Region =
@@ -51,6 +51,8 @@ export interface Gesture {
   fire_mode: FireMode
   points: Point[]
   times: number[]
+  /** 键盘快捷键，例如 ["Ctrl","Alt","A"]；空或缺省表示没有 */
+  hotkey?: string[]
   action: Action
 }
 
@@ -58,11 +60,12 @@ export interface Profile {
   id: string
   name: string
   exe: string
+  /** true = 交给程序自带手势：NextGestures 在该程序里不拦截鼠标、不响应快捷键。Global 永远为 false */
+  passthrough?: boolean
   gestures: Gesture[]
 }
 
 export interface Settings {
-  blacklist: string[]
   trigger_buttons: TriggerButton[]
   move_threshold: number
   match_threshold: number
@@ -85,13 +88,7 @@ export interface Settings {
   ai: AiSettings
 }
 
-export interface Shortcut {
-  keys: string[]
-  action: Action
-}
-
 export interface Config {
-  shortcuts?: Shortcut[]
   version: number
   settings: Settings
   profiles: Profile[]
@@ -133,9 +130,7 @@ export interface FiredPayload {
 export const api = {
   getConfig: () => invoke<Config>('get_config'),
   configPath: () => invoke<string>('config_path'),
-  saveShortcuts: (shortcuts: Shortcut[]) => invoke<void>('save_shortcuts', { shortcuts }),
   saveSettings: (settings: Settings) => invoke<void>('save_settings', { settings }),
-  saveBlacklist: (names: string[]) => invoke<void>('save_blacklist', { names }),
   upsertGesture: (profileId: string, gesture: Gesture) =>
     invoke<void>('upsert_gesture', { profileId, gesture }),
   removeGesture: (profileId: string, gestureId: string) =>
@@ -144,6 +139,10 @@ export const api = {
     invoke<void>('set_gesture_enabled', { profileId, gestureId, enabled }),
   upsertProfile: (profile: Profile) => invoke<void>('upsert_profile', { profile }),
   removeProfile: (profileId: string) => invoke<void>('remove_profile', { profileId }),
+  setProfilePassthrough: (profileId: string, passthrough: boolean) =>
+    invoke<void>('set_profile_passthrough', { profileId, passthrough }),
+  /** 因被其他程序占用而注册失败的快捷键标签，如 "Ctrl + Alt + T" */
+  hotkeyFailures: () => invoke<string[]>('hotkey_failures'),
   startRecording: () => invoke<void>('start_recording'),
   cancelRecording: () => invoke<void>('cancel_recording'),
   beginPick: () => invoke<void>('begin_pick'),
@@ -234,17 +233,51 @@ export function emptyGesture(trigger: TriggerButton = 'Right'): Gesture {
     fire_mode: 'OnRelease',
     points: [],
     times: [],
+    hotkey: [],
     action: { kind: 'none' },
   }
 }
 
-/** 以已有手势为模板复制出一个新手势草稿：新 id、可删除，其余数据（轨迹、触发、动作）原样保留 */
+/** 以已有手势为模板复制出一个新手势草稿：新 id、可删除、清空快捷键，其余数据（轨迹、触发、动作）原样保留 */
 export function cloneGesture(src: Gesture, suffix: string): Gesture {
   return {
     ...structuredClone(src),
+    // 同一配置组内快捷键不能重复，副本不带快捷键
+    hotkey: [],
     id: newId(),
     name: src.name ? `${src.name} ${suffix}` : '',
     enabled: true,
     deletable: true,
   }
+}
+
+export const DOCS_URL = 'https://doerrdev.github.io/NG-Doc/'
+export const DOCS_GESTURE_URL = `${DOCS_URL}guide/triggers/gesture.html`
+
+/** 在系统浏览器打开外链；非 Tauri 环境（vite 预览）退回 window.open */
+export async function openExternal(url: string): Promise<void> {
+  if (!isTauri()) {
+    window.open(url, '_blank', 'noopener,noreferrer')
+    return
+  }
+  await api.testAction({ kind: 'open_url', url })
+}
+
+/** 快捷键显示文本，例如 "Ctrl + Alt + A"；与后端 hotkey_failures 返回的格式一致 */
+export function hotkeyLabel(keys: string[] | undefined): string {
+  return (keys ?? []).join(' + ')
+}
+
+export function hasHotkey(g: Gesture): boolean {
+  return (g.hotkey?.length ?? 0) > 0
+}
+
+/** 是否配置了鼠标触发（轨迹、滚轮或屏幕边角） */
+export function hasMouseTrigger(g: Gesture): boolean {
+  return g.points.length > 0 || g.wheel.length > 0 || g.region != null
+}
+
+/** 只有快捷键、没有鼠标触发 */
+export function isHotkeyOnly(g: Gesture): boolean {
+  return hasHotkey(g) && !hasMouseTrigger(g)
 }

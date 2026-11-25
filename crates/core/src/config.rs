@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::recognizer::{self, Point};
 
 const LEGACY_BUILTIN_PIN_ID: &str = "builtin-pin-screenshot";
+/// 2：快捷键并入手势（Gesture.hotkey），黑名单并入配置组（Profile.passthrough）
+const CONFIG_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TriggerButton {
@@ -135,6 +137,16 @@ impl Gesture {
     pub fn is_dwell(&self) -> bool {
         self.dwell_ms > 0
     }
+
+    /// 能被鼠标输入触发：轨迹、滚轮、边角单击或边角停留
+    pub fn has_mouse_trigger(&self) -> bool {
+        !self.points.is_empty() || !self.wheel.is_empty() || self.is_edge_click()
+            || (self.is_dwell() && self.region.is_some())
+    }
+
+    pub fn has_hotkey(&self) -> bool {
+        self.hotkey.iter().any(|key| !key.trim().is_empty())
+    }
 }
 
 impl Action {
@@ -177,6 +189,9 @@ pub struct Gesture {
     pub times: Vec<f32>,
     #[serde(default)]
     pub action: Action,
+    /// 键盘快捷键，如 ["Ctrl","Alt","A"]；空表示没有快捷键
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hotkey: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,19 +203,29 @@ pub struct Profile {
     pub exe: String,
     #[serde(default)]
     pub gestures: Vec<Gesture>,
+    /// true = 在这个程序里交给程序自带手势（原黑名单），NextGestures 完全不拦截
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub passthrough: bool,
 }
 
 impl Profile {
     pub fn is_global(&self) -> bool {
         self.exe.is_empty()
     }
+
+    /// 专属于该进程的配置组（不含 Global）
+    pub fn matches_exe(&self, exe: &str) -> bool {
+        !self.is_global() && self.exe.trim().eq_ignore_ascii_case(exe.trim())
+    }
+
+    fn global() -> Self {
+        Self { id: "global".into(), name: "Global".into(), exe: String::new(), gestures: vec![], passthrough: false }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// 按进程名停用全部手势；旧配置默认为空。
-    pub blacklist: Vec<String>,
     pub trigger_buttons: Vec<TriggerButton>,
     /// 进入手势态的最小移动距离（像素）
     pub move_threshold: i32,
@@ -236,33 +261,9 @@ pub struct Settings {
     pub ai: AiSettings,
 }
 
-impl Settings {
-    pub fn set_blacklist(&mut self, names: Vec<String>) -> Result<()> {
-        let mut normalized = Vec::new();
-        for name in names {
-            let name = name.trim().to_ascii_lowercase();
-            anyhow::ensure!(
-                name.ends_with(".exe") && name.len() > 4
-                    && !name.chars().any(|c| c.is_control() || "\\/:*?\"<>|".contains(c)),
-                "请输入进程文件名，例如 chrome.exe"
-            );
-            if !normalized.contains(&name) {
-                normalized.push(name);
-            }
-        }
-        self.blacklist = normalized;
-        Ok(())
-    }
-
-    pub fn is_blacklisted(&self, exe: &str) -> bool {
-        !exe.is_empty() && self.blacklist.iter().any(|name| name.trim().eq_ignore_ascii_case(exe))
-    }
-}
-
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            blacklist: vec![],
             trigger_buttons: vec![TriggerButton::Right, TriggerButton::Middle],
             move_threshold: 20,
             match_threshold: 0.80,
@@ -317,16 +318,15 @@ impl std::fmt::Debug for AiSettings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Shortcut {
-    pub keys: Vec<String>,
-    pub action: Action,
+/// 版本 1 的全局快捷键列表，读取时迁移为 Global 里只有快捷键的手势
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+struct LegacyShortcut {
+    keys: Vec<String>,
+    action: Action,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub shortcuts: Vec<Shortcut>,
     #[serde(default = "version")]
     pub version: u32,
     #[serde(default)]
@@ -338,15 +338,9 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            shortcuts: Vec::new(),
-            version: version(),
+            version: CONFIG_VERSION,
             settings: Settings::default(),
-            profiles: vec![Profile {
-                id: "global".into(),
-                name: "Global".into(),
-                exe: String::new(),
-                gestures: vec![],
-            }],
+            profiles: vec![Profile::global()],
         }
     }
 }
@@ -360,17 +354,32 @@ impl Config {
         }
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("读取配置失败: {}", path.display()))?;
-        let mut cfg = Self::parse(&text)
+        let (cfg, migrated) = Self::parse_migrating(&text)
             .with_context(|| format!("解析配置失败: {}", path.display()))?;
-        if !cfg.profiles.iter().any(|p| p.is_global()) {
-            cfg.profiles.insert(0, Profile { id: "global".into(), name: "Global".into(), exe: String::new(), gestures: vec![] });
+        // 一次性迁移后立即落盘，之后不再重复迁移
+        if migrated {
+            cfg.save(path)?;
         }
-        cfg.migrate_legacy_builtins();
         Ok(cfg)
     }
 
+    #[cfg(test)]
     fn parse(text: &str) -> Result<Self> {
+        Ok(Self::parse_migrating(text)?.0)
+    }
+
+    /// 解析并迁移旧版字段；第二个返回值表示内容因迁移而变化，需要写回文件
+    fn parse_migrating(text: &str) -> Result<(Self, bool)> {
         let mut config: toml::Table = toml::from_str(text)?;
+        let shortcuts: Vec<LegacyShortcut> = match config.remove("shortcuts") {
+            Some(value) => value.try_into().context("旧版快捷键格式错误")?,
+            None => vec![],
+        };
+        let blacklist: Vec<String> = config
+            .get_mut("settings")
+            .and_then(|settings| settings.as_table_mut()?.remove("blacklist"))
+            .and_then(|value| value.try_into().ok())
+            .unwrap_or_default();
         // Keep AI credentials from older configs while dropping obsolete plugin switches.
         if let Some(ai) = config
             .remove("plugins")
@@ -383,7 +392,93 @@ impl Config {
                 settings.entry("ai").or_insert(ai);
             }
         }
-        Ok(config.try_into()?)
+        let mut cfg: Self = config.try_into()?;
+        if !cfg.profiles.iter().any(|p| p.is_global()) {
+            cfg.profiles.insert(0, Profile::global());
+        }
+        // Global 不能直通（手改配置时纠正）
+        cfg.profiles.iter_mut().filter(|p| p.is_global()).for_each(|p| p.passthrough = false);
+        cfg.migrate_legacy_builtins();
+        let migrated = cfg.version < CONFIG_VERSION || !shortcuts.is_empty() || !blacklist.is_empty();
+        cfg.migrate_shortcuts(shortcuts);
+        cfg.migrate_blacklist(blacklist);
+        cfg.version = cfg.version.max(CONFIG_VERSION);
+        Ok((cfg, migrated))
+    }
+
+    /// 旧版全局快捷键 → Global 配置组里只有快捷键的手势
+    fn migrate_shortcuts(&mut self, shortcuts: Vec<LegacyShortcut>) {
+        let mut n = 0;
+        for shortcut in shortcuts {
+            let id = loop {
+                n += 1;
+                let id = format!("shortcut-{n}");
+                if !self.profiles.iter().flat_map(|p| &p.gestures).any(|g| g.id == id) {
+                    break id;
+                }
+            };
+            let gesture = Gesture {
+                id,
+                name: describe_action(&shortcut.action),
+                enabled: true,
+                deletable: true,
+                trigger: None,
+                region: None,
+                wheel: vec![],
+                left_click: false,
+                dwell_ms: 0,
+                fire_mode: FireMode::OnRelease,
+                points: vec![],
+                times: vec![],
+                action: shortcut.action,
+                hotkey: shortcut.keys,
+            };
+            let global = self.profiles.iter_mut().find(|p| p.is_global()).expect("global profile exists");
+            global.gestures.push(gesture);
+        }
+    }
+
+    /// 旧版黑名单 → 配置组的「交给程序自带手势」
+    fn migrate_blacklist(&mut self, names: Vec<String>) {
+        let mut n = 0;
+        for name in names {
+            let exe = name.trim();
+            if exe.is_empty() {
+                continue;
+            }
+            if let Some(profile) = self.profiles.iter_mut().find(|p| p.matches_exe(exe)) {
+                profile.passthrough = true;
+                continue;
+            }
+            let id = loop {
+                n += 1;
+                let id = format!("passthrough-{n}");
+                if !self.profiles.iter().any(|p| p.id == id) {
+                    break id;
+                }
+            };
+            self.profiles.push(Profile {
+                id,
+                name: exe.to_string(),
+                exe: exe.to_string(),
+                gestures: vec![],
+                passthrough: true,
+            });
+        }
+    }
+
+    /// 前台程序属于「交给程序自带手势」的配置组时，NextGestures 完全不拦截
+    pub fn is_passthrough(&self, exe: &str) -> bool {
+        !exe.trim().is_empty() && self.profiles.iter().any(|p| p.passthrough && p.matches_exe(exe))
+    }
+
+    /// 交给钩子的直通进程名单
+    pub fn passthrough_exes(&self) -> Vec<String> {
+        self.profiles
+            .iter()
+            .filter(|p| p.passthrough && !p.is_global())
+            .map(|p| p.exe.trim().to_ascii_lowercase())
+            .collect()
     }
 
     fn migrate_legacy_builtins(&mut self) {
@@ -424,7 +519,7 @@ impl Config {
         self.profiles
             .iter()
             .flat_map(|p| &p.gestures)
-            .filter(|g| g.enabled)
+            .filter(|g| g.enabled && g.has_mouse_trigger())
     }
 
     /// 边角滚轮手势用到的区域掩码，钩子只在这些区域接管滚轮
@@ -468,6 +563,7 @@ impl Config {
             );
             anyhow::ensure!((100..=10_000).contains(&gesture.dwell_ms), "停留时长需在 100 ~ 10000 毫秒之间");
         }
+        anyhow::ensure!(gesture.has_mouse_trigger() || gesture.has_hotkey(), "请设置至少一种触发方式");
         let profile = self
             .profile_mut(profile_id)
             .with_context(|| format!("未找到配置组: {profile_id}"))?;
@@ -505,6 +601,29 @@ fn default_fire_mode() -> FireMode {
     FireMode::OnRelease
 }
 
+/// 迁移旧快捷键时用动作生成的手势名称
+fn describe_action(action: &Action) -> String {
+    fn key_label(key: &str) -> String {
+        let mut chars = key.trim().chars();
+        chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
+    }
+    match action {
+        Action::None => "快捷键".into(),
+        Action::Screenshot => "截图".into(),
+        Action::RecordRegion => "区域录屏".into(),
+        Action::AiJyutping => "粤拼".into(),
+        Action::AiTranslate => "AI 翻译".into(),
+        Action::AiPolish => "AI 润色".into(),
+        Action::LaunchApp { name, .. } => format!("启动 {name}"),
+        Action::Command { program, .. } => format!("运行命令 {program}"),
+        Action::Hotkey { keys } => {
+            format!("发送按键 {}", keys.iter().map(|k| key_label(k)).collect::<Vec<_>>().join("+"))
+        }
+        Action::KeySequence { .. } => "按键序列".into(),
+        Action::OpenUrl { url } => format!("打开网址 {url}"),
+    }
+}
+
 fn legacy_seed_gestures() -> [Gesture; 2] {
     [
         Gesture {
@@ -521,6 +640,7 @@ fn legacy_seed_gestures() -> [Gesture; 2] {
             points: recognizer::normalize(&shape_e()).unwrap_or_default(),
             times: vec![],
             action: Action::Command { program: "notepad.exe".into(), args: vec![], shell: false },
+            hotkey: vec![],
         },
         Gesture {
             id: "seed-o-close".into(),
@@ -536,6 +656,7 @@ fn legacy_seed_gestures() -> [Gesture; 2] {
             points: recognizer::normalize(&shape_o()).unwrap_or_default(),
             times: vec![],
             action: Action::Hotkey { keys: vec!["ctrl".into(), "w".into()] },
+            hotkey: vec![],
         },
     ]
 }
@@ -566,16 +687,156 @@ fn arc(center: Point, r: f32, from_deg: f32, to_deg: f32, n: usize) -> Vec<Point
 mod tests {
     use super::*;
 
-    #[test]
-    fn action_shortcuts_roundtrip_and_default_for_older_configs() {
-        assert!(Config::parse("version = 1").unwrap().shortcuts.is_empty());
-        let mut config = Config::default();
-        config.shortcuts.push(Shortcut {
-            keys: vec!["ctrl".into(), "alt".into(), "s".into()],
+    fn hotkey_only(id: &str, keys: &[&str]) -> Gesture {
+        Gesture {
+            id: id.into(),
+            name: id.into(),
+            enabled: true,
+            deletable: true,
+            trigger: None,
+            region: None,
+            wheel: vec![],
+            left_click: false,
+            dwell_ms: 0,
+            fire_mode: FireMode::OnRelease,
+            points: vec![],
+            times: vec![],
             action: Action::Screenshot,
+            hotkey: keys.iter().map(|k| k.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn legacy_shortcuts_migrate_to_hotkey_gestures_in_global() {
+        let (cfg, migrated) = Config::parse_migrating(r#"
+            version = 1
+            [[shortcuts]]
+            keys = ["ctrl", "alt", "s"]
+            action = { kind = "screenshot" }
+            [[shortcuts]]
+            keys = ["ctrl", "shift", "w"]
+            action = { kind = "hotkey", keys = ["ctrl", "w"] }
+            [[shortcuts]]
+            keys = ["alt", "u"]
+            action = { kind = "open_url", url = "https://x.test/?q={selection}" }
+            [[profiles]]
+            id = "global"
+            name = "Global"
+            [[profiles.gestures]]
+            id = "shortcut-1"
+            name = "existing"
+            wheel = ["Up"]
+            action = { kind = "none" }
+        "#).unwrap();
+        assert!(migrated);
+        assert_eq!(cfg.version, CONFIG_VERSION);
+        let global = &cfg.profiles[0];
+        let migrated: Vec<_> = global.gestures[1..].iter().collect();
+        assert_eq!(migrated.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(), ["shortcut-2", "shortcut-3", "shortcut-4"]);
+        assert_eq!(migrated.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(),
+            ["截图", "发送按键 Ctrl+W", "打开网址 https://x.test/?q={selection}"]);
+        assert_eq!(migrated[0].hotkey, ["ctrl", "alt", "s"]);
+        assert_eq!(migrated[1].action, Action::Hotkey { keys: vec!["ctrl".into(), "w".into()] });
+        for g in &migrated {
+            assert!(g.enabled && g.deletable && g.trigger.is_none() && g.region.is_none());
+            assert!(g.points.is_empty() && g.wheel.is_empty() && g.fire_mode == FireMode::OnRelease);
+            assert!(!g.has_mouse_trigger() && g.has_hotkey());
+        }
+        // 迁移后写回的文件不再含旧字段，再读不会重复迁移
+        let text = toml::to_string(&cfg).unwrap();
+        assert!(!text.contains("shortcuts"));
+        let (again, migrated) = Config::parse_migrating(&text).unwrap();
+        assert!(!migrated);
+        assert_eq!(again.profiles[0].gestures, cfg.profiles[0].gestures);
+    }
+
+    #[test]
+    fn legacy_blacklist_migrates_to_passthrough_profiles() {
+        let (cfg, migrated) = Config::parse_migrating(r#"
+            version = 1
+            [settings]
+            blacklist = ["photoshop.exe", " Chrome.EXE ", "chrome.exe", ""]
+            [[profiles]]
+            id = "global"
+            name = "Global"
+            [[profiles]]
+            id = "ps"
+            name = "Photoshop"
+            exe = "PhotoShop.exe"
+        "#).unwrap();
+        assert!(migrated);
+        assert_eq!(cfg.profiles.len(), 3);
+        assert!(!cfg.profiles[0].passthrough);
+        assert!(cfg.profiles[1].passthrough);
+        let chrome = &cfg.profiles[2];
+        assert_eq!((chrome.id.as_str(), chrome.name.as_str(), chrome.exe.as_str()),
+            ("passthrough-1", "Chrome.EXE", "Chrome.EXE"));
+        assert!(chrome.passthrough && chrome.gestures.is_empty());
+        assert!(cfg.is_passthrough("photoshop.exe"));
+        assert!(cfg.is_passthrough("CHROME.exe"));
+        assert!(!cfg.is_passthrough("mychrome.exe"));
+        assert!(!cfg.is_passthrough(""));
+        assert_eq!(cfg.passthrough_exes(), ["photoshop.exe", "chrome.exe"]);
+        let text = toml::to_string(&cfg).unwrap();
+        assert!(!text.contains("blacklist"));
+        let (again, migrated) = Config::parse_migrating(&text).unwrap();
+        assert!(!migrated);
+        assert_eq!(again.passthrough_exes(), cfg.passthrough_exes());
+    }
+
+    #[test]
+    fn current_configs_without_legacy_fields_do_not_migrate() {
+        let text = toml::to_string(&Config::default()).unwrap();
+        assert!(!Config::parse_migrating(&text).unwrap().1);
+        // 版本 1 的空配置仍会升级一次版本号
+        assert!(Config::parse_migrating("version = 1").unwrap().1);
+    }
+
+    #[test]
+    fn hotkey_and_passthrough_round_trip_and_are_omitted_when_unset() {
+        let mut cfg = config_with_gestures();
+        let text = toml::to_string(&cfg).unwrap();
+        assert!(!text.contains("\nhotkey =") && !text.contains("passthrough"));
+        cfg.profiles[0].gestures[0].hotkey = vec!["Ctrl".into(), "Alt".into(), "A".into()];
+        cfg.profiles[0].gestures.push(hotkey_only("only-key", &["Ctrl", "B"]));
+        cfg.profiles.push(Profile {
+            id: "app".into(), name: "App".into(), exe: "app.exe".into(), gestures: vec![], passthrough: true,
         });
-        let serialized = toml::to_string(&config).unwrap();
-        assert_eq!(Config::parse(&serialized).unwrap().shortcuts, config.shortcuts);
+        let back: Config = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.profiles[0].gestures, cfg.profiles[0].gestures);
+        assert!(back.profiles[1].passthrough);
+        // 设置里不再有黑名单字段，前端发来的设置也不会带回它
+        let settings: Settings = toml::from_str("blacklist = ['x.exe']").unwrap();
+        assert!(!toml::to_string(&settings).unwrap().contains("blacklist"));
+    }
+
+    #[test]
+    fn gesture_needs_a_mouse_or_keyboard_trigger() {
+        let mut cfg = Config::default();
+        let mut g = hotkey_only("k", &["Ctrl", "K"]);
+        assert!(cfg.upsert_gesture("global", g.clone()).is_ok());
+        g.hotkey = vec![" ".into()];
+        let error = cfg.upsert_gesture("global", g.clone()).unwrap_err();
+        assert_eq!(error.to_string(), "请设置至少一种触发方式");
+        g.wheel = vec![WheelDir::Up];
+        assert!(cfg.upsert_gesture("global", g.clone()).is_ok());
+        g.wheel.clear();
+        g.trigger = Some(TriggerButton::Right);
+        g.region = Some(Region::Top);
+        assert!(cfg.upsert_gesture("global", g).is_ok());
+    }
+
+    #[test]
+    fn hotkey_only_gestures_do_not_touch_hook_masks() {
+        let mut cfg = Config::default();
+        let mut g = hotkey_only("k", &["Ctrl", "K"]);
+        // 即便残留了按键或边角也不算鼠标手势
+        g.trigger = Some(TriggerButton::Right);
+        cfg.profiles[0].gestures.push(g);
+        assert_eq!(cfg.region_mask(), 0);
+        assert_eq!(cfg.edge_click_mask(), 0);
+        assert!(!cfg.has_dwell());
+        assert_eq!(cfg.trigger_mask(), Config::default().trigger_mask());
     }
 
     fn config_with_gestures() -> Config {
@@ -604,33 +865,6 @@ mod tests {
         let restored = Config::parse(&toml::to_string(&cfg).unwrap()).unwrap();
         assert!(!restored.settings.ai.show_polish_notes);
         assert_eq!(restored.settings.ai.model, "custom");
-    }
-
-    #[test]
-    fn blacklist_persists_and_old_settings_default_to_empty() {
-        let mut settings = Settings::default();
-        settings.blacklist = vec!["Chrome.EXE".into(), " msedge.exe ".into()];
-        let text = toml::to_string_pretty(&settings).unwrap();
-        let back: Settings = toml::from_str(&text).unwrap();
-        assert!(back.is_blacklisted("chrome.exe"));
-        assert!(back.is_blacklisted("MSEDGE.EXE"));
-        assert!(!back.is_blacklisted("mychrome.exe"));
-        assert!(!back.is_blacklisted(""));
-        let mut old: toml::Value = toml::from_str(&text).unwrap();
-        old.as_table_mut().unwrap().remove("blacklist");
-        let back: Settings = old.try_into().unwrap();
-        assert!(back.blacklist.is_empty());
-    }
-
-    #[test]
-    fn blacklist_normalizes_and_rejects_paths_without_changing_previous_list() {
-        let mut settings = Settings::default();
-        settings.set_blacklist(vec![" Chrome.EXE ".into(), "chrome.exe".into(), "Some Browser.exe".into()]).unwrap();
-        assert_eq!(settings.blacklist, vec!["chrome.exe", "some browser.exe"]);
-        for name in ["C:\\chrome.exe", "chrome", "", ".exe", "chrome?.exe"] {
-            assert!(settings.set_blacklist(vec![name.into()]).is_err());
-            assert_eq!(settings.blacklist, vec!["chrome.exe", "some browser.exe"]);
-        }
     }
 
     #[test]

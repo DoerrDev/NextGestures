@@ -1,4 +1,19 @@
-import { Play } from 'lucide-react'
+import { useState } from 'react'
+import {
+  AppWindow,
+  Circle,
+  CircleSlash,
+  Ellipsis,
+  ExternalLink,
+  Keyboard,
+  Languages,
+  ListOrdered,
+  PenLine,
+  Play,
+  Scissors,
+  Type,
+  type LucideIcon,
+} from 'lucide-react'
 import { api, type Action } from '../api'
 import { t, type Key } from '../i18n'
 import { HotkeyRecorder } from './HotkeyRecorder'
@@ -10,6 +25,8 @@ interface Props {
   onChange: (action: Action) => void
   onError: (msg: string) => void
   onRecordingChange: (recording: boolean) => void
+  /** 编辑区内其他录制进行中，禁止开始新的按键录制 */
+  recordDisabled?: boolean
 }
 
 type EditorKind = Exclude<Action['kind'], 'command'>
@@ -27,7 +44,57 @@ const KIND_LABEL: Record<EditorKind, Key> = {
   ai_polish: 'actionAiPolish',
 }
 
-const KINDS = Object.keys(KIND_LABEL) as EditorKind[]
+/** 图标网格里直接露出的常用动作，其余收在「更多」里 */
+const COMMON_TILES: { kind: EditorKind; label: Key; icon: LucideIcon }[] = [
+  { kind: 'hotkey', label: 'tileHotkey', icon: Keyboard },
+  { kind: 'open_url', label: 'tileOpenUrl', icon: ExternalLink },
+  { kind: 'launch_app', label: 'tileLaunchApp', icon: AppWindow },
+  { kind: 'screenshot', label: 'tileScreenshot', icon: Scissors },
+  { kind: 'record_region', label: 'tileRecordRegion', icon: Circle },
+  { kind: 'ai_translate', label: 'tileTranslate', icon: Languages },
+  { kind: 'ai_polish', label: 'tilePolish', icon: PenLine },
+]
+
+const MORE_TILES: { kind: EditorKind; label: Key; icon: LucideIcon }[] = [
+  { kind: 'key_sequence', label: 'tileKeySequence', icon: ListOrdered },
+  { kind: 'ai_jyutping', label: 'tileJyutping', icon: Type },
+  { kind: 'none', label: 'tileNone', icon: CircleSlash },
+]
+
+const isMoreKind = (kind: Action['kind']) => kind === 'command' || MORE_TILES.some((tile) => tile.kind === kind)
+
+function KindTiles({ kind, onPick }: { kind: Action['kind']; onPick: (kind: EditorKind) => void }) {
+  const [moreOpen, setMoreOpen] = useState(() => isMoreKind(kind))
+  const tile = ({ kind: k, label, icon: Icon }: (typeof COMMON_TILES)[number]) => (
+    <button
+      key={k}
+      type="button"
+      role="radio"
+      aria-checked={kind === k}
+      className={kind === k ? 'tile on' : 'tile'}
+      title={t(KIND_LABEL[k])}
+      onClick={() => kind !== k && onPick(k)}
+    >
+      <Icon size={16} strokeWidth={2} />
+      {t(label)}
+    </button>
+  )
+  return (
+    <div className="tiles" role="radiogroup" aria-label={t('actionKind')}>
+      {COMMON_TILES.map(tile)}
+      <button
+        type="button"
+        className={moreOpen || isMoreKind(kind) ? 'tile on more' : 'tile more'}
+        aria-expanded={moreOpen}
+        onClick={() => setMoreOpen(!moreOpen)}
+      >
+        <Ellipsis size={16} strokeWidth={2} />
+        {t('tileMore')}
+      </button>
+      {moreOpen && MORE_TILES.map(tile)}
+    </div>
+  )
+}
 
 function blank(kind: EditorKind): Action {
   switch (kind) {
@@ -50,7 +117,7 @@ function blank(kind: EditorKind): Action {
   }
 }
 
-export function ActionEditor({ action, onChange, onError, onRecordingChange }: Props) {
+export function ActionEditor({ action, onChange, onError, onRecordingChange, recordDisabled = false }: Props) {
   const isAiAction = action.kind === 'ai_jyutping' || action.kind === 'ai_translate' || action.kind === 'ai_polish'
   const canTest = action.kind === 'launch_app' || action.kind === 'hotkey' || action.kind === 'open_url' || action.kind === 'command'
 
@@ -64,22 +131,7 @@ export function ActionEditor({ action, onChange, onError, onRecordingChange }: P
 
   return (
     <>
-      <div className="field">
-        <label htmlFor="action-kind">{t('actionKind')}</label>
-        <select
-          id="action-kind"
-          value={action.kind}
-          onChange={(e) => onChange(blank(e.target.value as EditorKind))}
-        >
-          {action.kind === 'command' && (
-            <option value="command" disabled>{t('legacyCommand')}</option>
-          )}
-          {KINDS.map((kind) => (
-            <option key={kind} value={kind}>{t(KIND_LABEL[kind])}</option>
-          ))}
-        </select>
-      </div>
-
+      <KindTiles kind={action.kind} onPick={(kind) => onChange(blank(kind))} />
       {action.kind === 'screenshot' && (
         <p className="field-note">{t('screenshotActionHint')}</p>
       )}
@@ -104,7 +156,7 @@ export function ActionEditor({ action, onChange, onError, onRecordingChange }: P
         <div className="field">
           <label>{t('keys')}</label>
           <HotkeyRecorder keys={action.keys} onChange={(keys) => onChange({ ...action, keys })}
-            onRecordingChange={onRecordingChange} />
+            onRecordingChange={onRecordingChange} disabled={recordDisabled} />
         </div>
       )}
 

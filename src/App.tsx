@@ -1,16 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { getVersion } from '@tauri-apps/api/app'
-import { isTauri } from '@tauri-apps/api/core'
 import { check, type Update } from '@tauri-apps/plugin-updater'
 import {
   AppWindow,
   Ban,
-  BookOpen,
   Copy,
-  ExternalLink,
   Globe,
-  Keyboard,
   LayoutGrid,
   List,
   MoreHorizontal,
@@ -19,7 +15,6 @@ import {
   Power,
   PowerOff,
   Search,
-  Settings2,
   Trash2,
   TriangleAlert,
   Zap,
@@ -27,7 +22,12 @@ import {
 import {
   api,
   cloneGesture,
+  DOCS_URL,
   emptyGesture,
+  hasMouseTrigger,
+  hotkeyLabel,
+  isHotkeyOnly,
+  openExternal,
   type Config,
   type Gesture,
   type Profile,
@@ -36,15 +36,12 @@ import {
 import { findConflicts } from './conflicts'
 import { setLang, t } from './i18n'
 import { describeAction } from './components/ActionEditor'
-import { GesturePane } from './components/GesturePane'
+import { GesturePane, HotkeyThumb } from './components/GesturePane'
 import { ProfileDialog } from './components/ProfileDialog'
+import { Rail } from './components/Rail'
 import { SettingsDialog } from './components/SettingsDialog'
-import { BlacklistDialog } from './components/BlacklistDialog'
-import { ShortcutsDialog } from './components/ShortcutsDialog'
 import { StrokeCanvas } from './components/StrokeCanvas'
 import { VersionDialog } from './components/VersionDialog'
-
-const DOCS_URL = 'https://doerrdev.github.io/NG-Doc/'
 
 const TRIGGER_LABEL: Record<string, string> = {
   Right: '右键',
@@ -63,8 +60,6 @@ export function App() {
   const [editing, setEditing] = useState<{ gesture: Gesture; isNew: boolean } | null>(null)
   const [profileOpen, setProfileOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [shortcutsOpen, setShortcutsOpen] = useState(false)
-  const [blacklistOpen, setBlacklistOpen] = useState(false)
   const [unread, setUnread] = useState(0)
   const [enabled, setEnabled] = useState(true)
   const [toast, setToast] = useState('')
@@ -74,8 +69,7 @@ export function App() {
   const [updateStatus, setUpdateStatus] = useState<'checking' | 'checked' | 'failed'>('checking')
   const checkingUpdate = useRef(false)
   const [version, setVersion] = useState('')
-  // 手写动画只在页面首次加载时播放；播完摘掉动画类，窗口再次显示时不会重播
-  const [brandWritten, setBrandWritten] = useState(false)
+  const [hotkeyFailures, setHotkeyFailures] = useState<string[]>([])
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
   const [menuId, setMenuId] = useState('')
@@ -117,6 +111,14 @@ export function App() {
     const cfg = await api.getConfig()
     setLang(cfg.settings.language)
     setConfig(cfg)
+    // 快捷键在保存后重新注册，顺带刷新被占用的列表
+    api
+      .hotkeyFailures()
+      .then(setHotkeyFailures)
+      .catch((e) => {
+        console.error('读取快捷键注册失败列表出错', e)
+        setHotkeyFailures([])
+      })
     return cfg
   }, [])
 
@@ -181,14 +183,8 @@ export function App() {
   if (!config || !active) return null
 
   const onCount = active.gestures.filter((g) => g.enabled).length
-  const shortcuts = config.shortcuts ?? []
-  const blacklist = config.settings.blacklist ?? []
-  const isBlacklisted = (exe: string) => !!exe && blacklist.some((name) => name.trim().toLowerCase() === exe.toLowerCase())
-  const activeBlocked = isBlacklisted(active.exe)
-  const saveBlacklist = async (names: string[]) => {
-    await api.saveBlacklist(names)
-    await reload()
-  }
+  const activePassthrough = !!active.exe && !!active.passthrough
+  const totalGestures = config.profiles.reduce((n, p) => n + p.gestures.length, 0)
   const offCount = active.gestures.length - onCount
 
   const needle = query.trim().toLowerCase()
@@ -196,7 +192,10 @@ export function App() {
     if (filter === 'on' && !g.enabled) return false
     if (filter === 'off' && g.enabled) return false
     if (!needle) return true
-    return `${g.name} ${describeAction(g.action)}`.toLowerCase().includes(needle)
+    const keys = g.hotkey ?? []
+    return `${g.name} ${describeAction(g.action)} ${hotkeyLabel(keys)} ${keys.join('+')}`
+      .toLowerCase()
+      .includes(needle)
   })
 
   const guard = async (fn: () => Promise<void>) => {
@@ -208,12 +207,23 @@ export function App() {
     }
   }
 
-  const saveGesture = (gesture: Gesture) =>
+  /** 失败时把后端的错误抛回编辑面板，由面板内联显示 */
+  const saveGesture = async (gesture: Gesture) => {
+    await api.upsertGesture(active.id, gesture)
+    setEditing(view === 'list' ? { gesture, isNew: false } : null)
+    flash(t('saved'))
+    await reload().catch((e) => flash(String(e)))
+  }
+
+  const setPassthrough = (passthrough: boolean) => {
+    if (passthrough === activePassthrough) return
     void guard(async () => {
-      await api.upsertGesture(active.id, gesture)
-      setEditing(view === 'list' ? { gesture, isNew: false } : null)
-      flash(t('saved'))
+      await api.setProfilePassthrough(active.id, passthrough)
+      flash(passthrough ? t('passthroughOn') : t('passthroughOff'))
     })
+  }
+
+  const openDocs = () => void openExternal(DOCS_URL).catch((e) => flash(String(e)))
 
   const saveProfile = (profile: Profile) =>
     void guard(async () => {
@@ -261,54 +271,37 @@ export function App() {
     return parts.join(' → ')
   }
 
+  /** 触发列在鼠标徽标后追加键帽样式的快捷键标签 */
+  const hotkeyTag = (g: Gesture) => {
+    const label = hotkeyLabel(g.hotkey)
+    if (!label) return null
+    const busy = hotkeyFailures.includes(label)
+    return (
+      <span
+        className={!g.enabled ? 'tag kb mute' : busy ? 'tag kb busy' : 'tag kb'}
+        title={busy ? t('hotkeyBusy') : undefined}
+      >
+        {label}
+      </span>
+    )
+  }
+
   return (
     <div className="shell">
-      <header className="topbar">
-        <span
-          className={brandWritten ? 'brand-wordmark' : 'brand-wordmark writing'}
-          onAnimationEnd={() => setBrandWritten(true)}
-        >
-          {t('appName')}
-        </span>
-        {version && (
-          <button
-            type="button"
-            className={update ? 'version-tag has-update' : 'version-tag'}
-            title={update ? `${t('updateHint')} v${update.version}` : t('versionHint')}
-            aria-haspopup="dialog"
-            onClick={() => {
-              setVersionOpen(true)
-              void checkForUpdates()
-            }}
-          >
-            v{version}
-            {update && <span className="dot" />}
-          </button>
-        )}
-        <div className="topbar-right">
-          <button
-            type="button"
-            className={enabled ? 'switch' : 'switch off'}
-            title={t('gesturesEnabled')}
-            onClick={() => void toggleMaster(!enabled)}
-          >
-            <span className="switch-track">
-              <span className="switch-knob" />
-            </span>
-            {enabled ? t('masterOn') : t('masterOff')}
-          </button>
-          <button
-            type="button"
-            className="btn-outline subtle"
-            title={unread > 0 ? `${unread} ${t('fbUnread')}` : undefined}
-            onClick={() => setSettingsOpen(true)}
-          >
-            <Settings2 size={16} strokeWidth={2} />
-            {t('settings')}
-            {unread > 0 && <span className="dot" />}
-          </button>
-        </div>
-      </header>
+      <Rail
+        gestureCount={totalGestures}
+        enabled={enabled}
+        onToggleEnabled={() => void toggleMaster(!enabled).catch((e) => flash(String(e)))}
+        unread={unread}
+        onSettings={() => setSettingsOpen(true)}
+        onDocs={openDocs}
+        version={version}
+        update={update}
+        onVersion={() => {
+          setVersionOpen(true)
+          void checkForUpdates()
+        }}
+      />
 
       <div className="board">
         <aside className="side">
@@ -343,7 +336,7 @@ export function App() {
                   <Globe size={15} strokeWidth={2} className="prof-icon" />
                 )}
                 <span>{p.exe ? p.name : t('global')}</span>
-                {isBlacklisted(p.exe) && <Ban size={14} className="prof-icon" aria-label={t('blacklistBlocked')} />}
+                {p.exe && p.passthrough && <Ban size={14} className="prof-icon" aria-label={t('passthroughOn')} />}
                 <small>{p.gestures.length}</small>
                 {p.exe && (
                   <button
@@ -364,54 +357,34 @@ export function App() {
               <Plus size={15} strokeWidth={2} />
               {t('addProfile')}
             </button>
-            <div className="side-blacklist">
-              <button type="button" className="prof" onClick={() => setShortcutsOpen(true)}>
-                <Keyboard size={16} className="prof-icon" />
-                <span>{t('shortcuts')}</span>
-                <small>{shortcuts.length}</small>
-              </button>
-            </div>
-            <div className="side-blacklist">
-              <button type="button" className="prof" onClick={() => setBlacklistOpen(true)}>
-                <Ban size={16} className="prof-icon" />
-                <span>{t('tabBlacklist')}</span>
-                <small>{blacklist.length}</small>
-              </button>
-              <p>{t('blacklistSidebarHint')}</p>
-            </div>
-          </div>
-          <div className="side-foot">
-            <a
-              className="prof side-docs"
-              href={DOCS_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(event) => {
-                if (!isTauri()) return
-                event.preventDefault()
-                void api.testAction({ kind: 'open_url', url: DOCS_URL }).catch((error) => flash(String(error)))
-              }}
-            >
-              <BookOpen size={16} className="prof-icon" aria-hidden="true" />
-              <span>{t('docs')}</span>
-              <ExternalLink size={13} className="prof-icon side-docs-external" aria-hidden="true" />
-            </a>
           </div>
         </aside>
 
-        <main className="main">
+        <main className={activePassthrough ? 'main dim' : 'main'}>
           <div className="head">
             <h1>{t('gestureList')}</h1>
             <p className="subtitle">{active.exe || t('globalHint')}</p>
             {active.exe && (
-              <button type="button" className="btn-outline subtle" onClick={() => void guard(async () => {
-                await api.saveBlacklist(activeBlocked
-                  ? blacklist.filter((name) => name.trim().toLowerCase() !== active.exe.toLowerCase())
-                  : [...blacklist, active.exe])
-                flash(activeBlocked ? t('blacklistRemoved') : t('blacklistAdded'))
-              })}>
-                <Ban size={14} />{activeBlocked ? t('blacklistRestore') : t('blacklistBlockApp')}
-              </button>
+              <div className="segs pmode" role="radiogroup" aria-label={t('profileMode')}>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={!activePassthrough}
+                  className={activePassthrough ? '' : 'on'}
+                  onClick={() => setPassthrough(false)}
+                >
+                  {t('modeNative')}
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={activePassthrough}
+                  className={activePassthrough ? 'on' : ''}
+                  onClick={() => setPassthrough(true)}
+                >
+                  {t('modePassthrough')}
+                </button>
+              </div>
             )}
 
             <div className="search">
@@ -468,9 +441,12 @@ export function App() {
             </button>
           </div>
 
-          {activeBlocked && (
-            <div className="blacklist-status" role="status">
-              <Ban size={14} /> {t('blacklistBlockedHint')}
+          {activePassthrough && (
+            <div className="banner" role="status">
+              <Ban size={16} strokeWidth={2} className="banner-icon" />
+              <span>
+                {active.name} {t('passthroughBanner')}
+              </span>
             </div>
           )}
           {conflicts.pairs.length > 0 && (
@@ -517,16 +493,20 @@ export function App() {
                       onClick={() => setEditing({ gesture: g, isNew: false })}
                       onKeyDown={(e) => e.key === 'Enter' && setEditing({ gesture: g, isNew: false })}
                     >
-                      <StrokeCanvas
-                        className="rthumb"
-                        points={g.points}
-                        trigger={g.trigger}
-                        leftClick={g.left_click}
-                        region={g.region}
-                        wheel={g.wheel}
-                        color={g.enabled ? config.settings.trail_color : '#a1a1a1'}
-                        width={2.5}
-                      />
+                      {isHotkeyOnly(g) ? (
+                        <HotkeyThumb className="rthumb" />
+                      ) : (
+                        <StrokeCanvas
+                          className="rthumb"
+                          points={g.points}
+                          trigger={g.trigger}
+                          leftClick={g.left_click}
+                          region={g.region}
+                          wheel={g.wheel}
+                          color={g.enabled ? config.settings.trail_color : '#a1a1a1'}
+                          width={2.5}
+                        />
+                      )}
                       <div className="rname">{g.name}</div>
                       <div className="rtags">
                         {triggerChip(g) && (
@@ -535,6 +515,7 @@ export function App() {
                         {g.region && (
                           <span className={g.enabled ? 'tag' : 'tag mute'}>{t(`region${g.region}`)}</span>
                         )}
+                        {hotkeyTag(g)}
                         {g.enabled && conflicts.ids.has(g.id) && (
                           <span className="tag warn">{t('conflict')}</span>
                         )}
@@ -585,7 +566,9 @@ export function App() {
 
                   {editing?.isNew && (
                     <div className="row draft sel">
-                      {editing.gesture.points.length > 0 || editing.gesture.wheel.length > 0 || editing.gesture.region ? (
+                      {isHotkeyOnly(editing.gesture) ? (
+                        <HotkeyThumb className="rthumb" />
+                      ) : hasMouseTrigger(editing.gesture) ? (
                         <StrokeCanvas
                           className="rthumb"
                           points={editing.gesture.points}
@@ -602,6 +585,7 @@ export function App() {
                       <div className="rname">{editing.gesture.name || t('untitled')}</div>
                       <div className="rtags">
                         <span className="tag warn">{t('draftFlag')}</span>
+                        {hotkeyTag(editing.gesture)}
                       </div>
                       <div className="rdesc">{describeAction(editing.gesture.action) || '—'}</div>
                       <div className="racts" />
@@ -624,6 +608,7 @@ export function App() {
                   initial={editing.gesture}
                   isNew={editing.isNew}
                   onSave={saveGesture}
+                  hotkeyFailures={hotkeyFailures}
                   onClose={() => setEditing(null)}
                   onDuplicate={duplicateGesture}
                   onToggle={(g) =>
@@ -668,17 +653,21 @@ export function App() {
                       .join(' ')}
                   >
                     <div className="card-head">
-                      <StrokeCanvas
-                        className="thumb"
-                        points={g.points}
-                        times={g.times}
-                        trigger={g.trigger}
-                        leftClick={g.left_click}
-                        region={g.region}
-                        wheel={g.wheel}
-                        color={g.enabled ? config.settings.trail_color : '#a1a1a1'}
-                        width={4}
-                      />
+                      {isHotkeyOnly(g) ? (
+                        <HotkeyThumb className="thumb" />
+                      ) : (
+                        <StrokeCanvas
+                          className="thumb"
+                          points={g.points}
+                          times={g.times}
+                          trigger={g.trigger}
+                          leftClick={g.left_click}
+                          region={g.region}
+                          wheel={g.wheel}
+                          color={g.enabled ? config.settings.trail_color : '#a1a1a1'}
+                          width={4}
+                        />
+                      )}
                       {!g.enabled && <span className="flag">{t('disabled')}</span>}
                       {g.enabled && conflicts.ids.has(g.id) && (
                         <span className="flag warn">
@@ -737,7 +726,10 @@ export function App() {
                           {t(`region${g.region}`)}
                         </span>
                       )}
-                      {g.fire_mode === 'Immediate' && <span className="tag yellow">{t('immediate')}</span>}
+                      {hotkeyTag(g)}
+                      {g.fire_mode === 'Immediate' && hasMouseTrigger(g) && (
+                        <span className="tag yellow">{t('immediate')}</span>
+                      )}
                     </div>
 
                     <div className={g.action.kind === 'open_url' ? 'card-desc url' : 'card-desc'}>
@@ -788,16 +780,6 @@ export function App() {
           onSave={saveSettings}
           onClose={() => setSettingsOpen(false)}
         />
-      )}
-      {shortcutsOpen && (
-        <ShortcutsDialog shortcuts={shortcuts} onClose={() => setShortcutsOpen(false)} onSave={async (shortcuts) => {
-          await api.saveShortcuts(shortcuts)
-          await reload()
-          flash(t('shortcutSaved'))
-        }} />
-      )}
-      {blacklistOpen && (
-        <BlacklistDialog names={blacklist} onChange={saveBlacklist} onClose={() => setBlacklistOpen(false)} />
       )}
       {confirmRemove && (
         <div className="mask" onMouseDown={(e) => e.target === e.currentTarget && setConfirmRemove(null)}>

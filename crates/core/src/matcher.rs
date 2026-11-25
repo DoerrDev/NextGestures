@@ -33,7 +33,7 @@ pub fn best_above<'a>(
     input: Input<'_>,
     threshold: f32,
 ) -> Option<Matched<'a>> {
-    if cfg.settings.is_blacklisted(exe) {
+    if cfg.is_passthrough(exe) {
         return None;
     }
     let app = cfg.profiles.iter().filter(|p| matches_exe(p, exe));
@@ -43,7 +43,31 @@ pub fn best_above<'a>(
 }
 
 fn matches_exe(p: &Profile, exe: &str) -> bool {
-    !p.is_global() && p.exe.eq_ignore_ascii_case(exe)
+    p.matches_exe(exe)
+}
+
+/// 快捷键对应的手势：进程专属配置组优先，其次 Global；直通程序里不响应。
+/// `is_chord` 判断手势的按键是否就是按下的组合键（解析由平台层负责）。
+pub fn hotkey_gesture<'a>(
+    cfg: &'a Config,
+    exe: &str,
+    is_chord: impl Fn(&[String]) -> bool,
+) -> Option<Matched<'a>> {
+    if cfg.is_passthrough(exe) {
+        return None;
+    }
+    let find = |global: bool| {
+        cfg.profiles
+            .iter()
+            .filter(|p| if global { p.is_global() } else { matches_exe(p, exe) })
+            .find_map(|p| {
+                p.gestures
+                    .iter()
+                    .find(|g| g.enabled && g.has_hotkey() && is_chord(&g.hotkey))
+                    .map(|g| Matched { profile_id: &p.id, gesture: g, score: 1.0 })
+            })
+    };
+    find(false).or_else(|| find(true))
 }
 
 /// 在会话结束前，用户仍可把右键轨迹追加为左键组合，需延后立即执行。
@@ -64,7 +88,8 @@ fn best_of<'a, I: Iterator<Item = &'a Profile>>(
     let mut best: Option<(bool, Matched<'a>)> = None;
     for p in profiles {
         for g in &p.gestures {
-            if !g.enabled || g.trigger != input.button || g.wheel != input.wheel
+            // 只有快捷键的手势不参与鼠标匹配
+            if !g.enabled || !g.has_mouse_trigger() || g.trigger != input.button || g.wheel != input.wheel
                 || g.left_click != input.left_click || g.is_dwell() != input.dwell {
                 continue;
             }
@@ -108,7 +133,16 @@ mod tests {
             points,
             times: vec![],
             action: Action::None,
+            hotkey: vec![],
         }
+    }
+
+    fn keys(keys: &[&str]) -> Vec<String> {
+        keys.iter().map(|k| k.to_string()).collect()
+    }
+
+    fn hotkey_only(id: &str, chord: &[&str]) -> Gesture {
+        Gesture { trigger: None, hotkey: keys(chord), ..gesture(id, vec![]) }
     }
 
     fn input(button: TriggerButton, stroke: &[Point]) -> Input<'_> {
@@ -132,12 +166,14 @@ mod tests {
             name: "Global".into(),
             exe: String::new(),
             gestures: vec![gesture("g-right", stroke.clone())],
+            passthrough: false,
         });
         cfg.profiles.push(Profile {
             id: "ps".into(),
             name: "Photoshop".into(),
             exe: "photoshop.exe".into(),
             gestures: vec![gesture("ps-right", stroke.clone())],
+            passthrough: false,
         });
         (cfg, stroke)
     }
@@ -150,15 +186,60 @@ mod tests {
     }
 
     #[test]
-    fn blacklist_overrides_app_and_global_gestures() {
+    fn passthrough_overrides_app_and_global_gestures() {
         let (mut cfg, stroke) = cfg_with_app();
-        cfg.settings.blacklist = vec!["PHOTOSHOP.EXE".into(), "explorer.exe".into()];
+        cfg.profile_mut("ps").unwrap().exe = "PHOTOSHOP.EXE".into();
+        cfg.profile_mut("ps").unwrap().passthrough = true;
+        cfg.profiles.push(Profile {
+            id: "ex".into(), name: "Explorer".into(), exe: "explorer.exe".into(), gestures: vec![], passthrough: true,
+        });
         let input = input(TriggerButton::Right, &stroke);
         assert!(best(&cfg, "photoshop.exe", input).is_none());
         assert!(best_above(&cfg, "explorer.exe", input, 0.0).is_none());
         assert!(best(&cfg, "other.exe", input).is_some());
-        cfg.settings.blacklist.clear();
+        cfg.profile_mut("ps").unwrap().passthrough = false;
         assert_eq!(best(&cfg, "photoshop.exe", input).unwrap().gesture.id, "ps-right");
+    }
+
+    #[test]
+    fn hotkey_only_gestures_never_match_mouse_input() {
+        let (mut cfg, _) = cfg_with_app();
+        cfg.profiles[0].gestures = vec![hotkey_only("k", &["ctrl", "k"])];
+        cfg.profiles[1].gestures.clear();
+        let none = Input { button: None, region: None, wheel: &[], left_click: false, dwell: false, stroke: None };
+        for input in [
+            none,
+            Input { button: Some(TriggerButton::Right), ..none },
+            Input { region: Some(Region::Top), ..none },
+            Input { dwell: true, region: Some(Region::Left), ..none },
+        ] {
+            assert!(best_above(&cfg, "x.exe", input, 0.0).is_none());
+        }
+        // 残留了按键也一样
+        cfg.profiles[0].gestures[0].trigger = Some(TriggerButton::Right);
+        assert!(best_above(&cfg, "x.exe", Input { button: Some(TriggerButton::Right), ..none }, 0.0).is_none());
+        assert!(!requires_release(&cfg, "x.exe", Some(TriggerButton::Right)));
+    }
+
+    #[test]
+    fn hotkeys_prefer_app_profile_then_global_and_skip_passthrough() {
+        let (mut cfg, stroke) = cfg_with_app();
+        let ctrl_k = |k: &[String]| k.iter().map(|s| s.to_ascii_lowercase()).eq(["ctrl", "k"].map(String::from));
+        // 有轨迹的手势也可以带快捷键
+        cfg.profile_mut("global").unwrap().gestures[0].hotkey = keys(&["Ctrl", "K"]);
+        cfg.profile_mut("ps").unwrap().gestures.push(hotkey_only("ps-k", &["ctrl", "k"]));
+        assert_eq!(hotkey_gesture(&cfg, "PhotoShop.exe", ctrl_k).unwrap().gesture.id, "ps-k");
+        assert_eq!(hotkey_gesture(&cfg, "other.exe", ctrl_k).unwrap().gesture.id, "g-right");
+        // 鼠标侧不受快捷键影响
+        assert_eq!(best(&cfg, "other.exe", input(TriggerButton::Right, &stroke)).unwrap().gesture.id, "g-right");
+
+        cfg.profile_mut("ps").unwrap().gestures[1].enabled = false;
+        assert_eq!(hotkey_gesture(&cfg, "photoshop.exe", ctrl_k).unwrap().profile_id, "global");
+        cfg.profile_mut("ps").unwrap().passthrough = true;
+        assert!(hotkey_gesture(&cfg, "photoshop.exe", ctrl_k).is_none());
+        assert!(hotkey_gesture(&cfg, "other.exe", |_: &[String]| false).is_none());
+        cfg.profile_mut("global").unwrap().gestures[0].enabled = false;
+        assert!(hotkey_gesture(&cfg, "other.exe", ctrl_k).is_none());
     }
 
     #[test]

@@ -28,6 +28,7 @@ export function ProfileDialog({ onSave, onClose }: Props) {
   const [picking, setPicking] = useState(false)
   const [preview, setPreview] = useState<PickInfo | null>(null)
   const [error, setError] = useState('')
+  const [passthrough, setPassthrough] = useState(false)
 
   useEffect(() => {
     const offHover = listen<PickInfo | null>('pick:hover', (e) => {
@@ -58,7 +59,7 @@ export function ProfileDialog({ onSave, onClose }: Props) {
   const submit = () => {
     const target = exe.trim().toLowerCase()
     if (!target) return setError(t('needExe'))
-    onSave({ id: newId(), name: name.trim() || target, exe: target, gestures: [] })
+    onSave({ id: newId(), name: name.trim() || target, exe: target, passthrough, gestures: [] })
   }
 
   return (
@@ -107,6 +108,32 @@ export function ProfileDialog({ onSave, onClose }: Props) {
               value={name}
               onChange={(e) => setName(e.target.value)}
             />
+          </div>
+          <div className="field" role="radiogroup" aria-labelledby="p-mode">
+            <label id="p-mode">{t('profileMode')}</label>
+            <div className="opts">
+              {(
+                [
+                  [false, 'profileModeNative', 'profileModeNativeSub'],
+                  [true, 'profileModePassthrough', 'profileModePassthroughSub'],
+                ] as const
+              ).map(([value, title, sub]) => (
+                <button
+                  key={title}
+                  type="button"
+                  role="radio"
+                  aria-checked={passthrough === value}
+                  className={passthrough === value ? 'opt on' : 'opt'}
+                  onClick={() => setPassthrough(value)}
+                >
+                  <i aria-hidden="true" />
+                  <span>
+                    {t(title)}
+                    <small>{t(sub)}</small>
+                  </span>
+                </button>
+              ))}
+            </div>
           </div>
         </div>
         <div className="dialog-foot">
