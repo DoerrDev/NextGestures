@@ -5,10 +5,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, ensure};
 use gesture_platform::input;
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
-use windows::Win32::System::Variant::VT_BOOL;
-use windows::Win32::System::{Com::*, DataExchange::*, Memory::*};
-use windows::Win32::UI::{Accessibility::*, Input::KeyboardAndMouse::*, WindowsAndMessaging::*};
-use windows::core::{Interface, w};
+use windows::Win32::System::{DataExchange::*, Memory::*};
+use windows::Win32::UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*};
+use windows::core::w;
 
 const UNICODE_TEXT: u32 = 13;
 static CLIPBOARD_ACCESS: Mutex<()> = Mutex::new(());
@@ -60,78 +59,6 @@ impl Target {
             }
             owner_pid != 0 && (owner_pid == foreground_pid || owner_pid == focus_pid)
         }
-    }
-}
-
-pub fn editable(target: Target) -> bool {
-    if !target.is_current() {
-        return false;
-    }
-    if let Some(editable) = native_editability(HWND(target.focus as _)) {
-        return editable;
-    }
-    // 可访问性提供程序可能跨进程阻塞。超时则展示结果供手动复制。
-    let (send, receive) = std::sync::mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let result = target.is_current() && inspect_editability().unwrap_or(false);
-        let _ = send.send(result && target.is_current());
-    });
-    receive
-        .recv_timeout(Duration::from_millis(700))
-        .unwrap_or(false)
-}
-
-fn native_editability(focus: HWND) -> Option<bool> {
-    let mut name = [0; 64];
-    let len = unsafe { GetClassNameW(focus, &mut name) };
-    if len <= 0 {
-        return None;
-    }
-    let class = String::from_utf16_lossy(&name[..len as usize]).to_ascii_lowercase();
-    if class == "edit" || class.starts_with("richedit") {
-        let style = unsafe { GetWindowLongW(focus, GWL_STYLE) };
-        return Some(style & (ES_READONLY | ES_PASSWORD) == 0);
-    }
-    None
-}
-
-fn inspect_editability() -> Option<bool> {
-    unsafe {
-        CoInitializeEx(None, COINIT_MULTITHREADED).ok().ok()?;
-        struct Com;
-        impl Drop for Com {
-            fn drop(&mut self) {
-                unsafe { CoUninitialize() }
-            }
-        }
-        let _com = Com;
-        let uia: IUIAutomation =
-            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
-        let focused = uia.GetFocusedElement().ok()?;
-        if focused.CurrentIsPassword().ok()?.as_bool() {
-            return Some(false);
-        }
-        if let Ok(pattern) = focused.GetCurrentPattern(UIA_ValuePatternId)
-            && let Ok(value) = pattern.cast::<IUIAutomationValuePattern>()
-        {
-            return value.CurrentIsReadOnly().ok().map(|value| !value.as_bool());
-        }
-        // RichEdit 和部分浏览器编辑器将只读标记暴露在 TextPattern 的选区上。
-        let range_read_only = (|| {
-            let pattern = focused.GetCurrentPattern(UIA_TextPatternId).ok()?;
-            let text = pattern.cast::<IUIAutomationTextPattern>().ok()?;
-            let range = text.GetSelection().ok()?.GetElement(0).ok()?;
-            let attr = range.GetAttributeValue(UIA_IsReadOnlyAttributeId).ok()?;
-            if attr.Anonymous.Anonymous.vt != VT_BOOL {
-                return None;
-            }
-            bool::try_from(&attr).ok()
-        })();
-        if let Some(read_only) = range_read_only {
-            return Some(!read_only);
-        }
-        // Some custom editors expose the Edit role but no Value or Text pattern.
-        Some(focused.CurrentControlType().ok()? == UIA_EditControlTypeId)
     }
 }
 
@@ -313,10 +240,10 @@ pub fn replace(
     result: &str,
     active: impl Fn() -> bool,
 ) -> Result<bool> {
-    if !target.is_current()
-        || !editable(target)
-        || capture(owner, target).as_deref().ok() != Some(original)
-    {
+    if !active() || !target.is_current() {
+        return Ok(false);
+    }
+    if capture(owner, target).as_deref().ok() != Some(original) {
         return Ok(false);
     }
     if !active() || !modifiers_released() || !target.is_current() {
@@ -329,16 +256,20 @@ pub fn replace(
         return Ok(false);
     }
     let owner = HWND(owner as _);
-    let (snapshot, paste_sequence) = {
+    let snapshot = {
         let clipboard = Clipboard::open(owner)?;
         let snapshot = clipboard.snapshot()?;
         if let Err(error) = clipboard.write_text(result, true) {
             let _ = snapshot.restore(&clipboard);
             return Err(error);
         }
-        (snapshot, sequence())
+        snapshot
     };
-    let paste = if active() && target.is_current() && sequence() == paste_sequence {
+    // Windows updates the sequence when CloseClipboard publishes our write.
+    let paste_sequence = sequence();
+    let still_ours =
+        || unsafe { GetClipboardOwner() }.ok() == Some(owner) && sequence() == paste_sequence;
+    let paste = if active() && target.is_current() && still_ours() {
         input::send_hotkey(&["ctrl".into(), "v".into()]).map(|()| true)
     } else {
         Ok(false)
@@ -347,7 +278,7 @@ pub fn replace(
         sleep(Duration::from_millis(500));
     }
     let clipboard = Clipboard::open(owner)?;
-    if sequence() == paste_sequence {
+    if still_ours() {
         snapshot.restore(&clipboard)?;
     }
     paste
