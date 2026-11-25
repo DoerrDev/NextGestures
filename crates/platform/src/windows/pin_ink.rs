@@ -380,7 +380,10 @@ pub(super) fn with_picture<R>(f: impl FnOnce(&mut Picture) -> R) -> R {
 }
 
 pub(super) fn redraw(hwnd: HWND) -> Result<()> {
-    with_picture(|p| p.paint_view());
+    with_picture(|p| {
+        p.paint_view();
+        p.refresh_zoom()
+    })?;
     render(hwnd, None)
 }
 
@@ -563,9 +566,14 @@ fn place_ime(hwnd: HWND) {
         let size = p.ink.text_size();
         let e = p.ink.edit.as_ref()?;
         let (cx, cy) = pin_text::caret(&e.text, e.caret, size).ok()?;
+        let (width, height) = p.display_size();
         Some(POINT {
-            x: SHADOW + e.left + cx - p.view.x,
-            y: SHADOW + e.top + cy - p.view.y,
+            x: SHADOW
+                + ((e.left + cx - p.view.x) as f32 * width as f32 / p.view.width as f32).round()
+                    as i32,
+            y: SHADOW
+                + ((e.top + cy - p.view.y) as f32 * height as f32 / p.view.height as f32).round()
+                    as i32,
         })
     });
     let Some(position) = position else { return };
@@ -866,9 +874,10 @@ fn pick_color(owner: HWND, initial: u32) -> Option<u32> {
 }
 
 fn image_point(p: &Picture, client: POINT) -> P {
+    let (width, height) = p.display_size();
     (
-        (client.x - SHADOW + p.view.x) as f32 + 0.5,
-        (client.y - SHADOW + p.view.y) as f32 + 0.5,
+        p.view.x as f32 + ((client.x - SHADOW) as f32 + 0.5) * p.view.width as f32 / width as f32,
+        p.view.y as f32 + ((client.y - SHADOW) as f32 + 0.5) * p.view.height as f32 / height as f32,
     )
 }
 

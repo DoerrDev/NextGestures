@@ -689,17 +689,19 @@ pub(super) fn position() -> Result<()> {
     Ok(())
 }
 
-/// 贴图被点击选中时显示工具栏，失去选中时隐藏。
-pub(super) fn show(selected: bool) {
-    BAR.with(|b| {
-        if let Some(b) = b.borrow_mut().as_mut() {
-            b.selected = selected;
-        }
+pub(super) fn set_selected(selected: bool) {
+    let changed = BAR.with(|b| {
+        let mut b = b.borrow_mut();
+        b.as_mut().is_some_and(|b| {
+            std::mem::replace(&mut b.selected, selected) != selected
+        })
     });
-    apply_visibility();
+    if changed {
+        apply_visibility();
+    }
 }
 
-/// 可见 = 已选中且不在模态对话框中。
+/// 选中的贴图显示工具栏，打开模态对话框时暂时隐藏。
 fn apply_visibility() {
     let state = BAR.with(|b| b.borrow().as_ref().map(|b| (b.window, b.selected && !b.busy)));
     let Some((window, visible)) = state else { return };
