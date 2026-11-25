@@ -1,7 +1,9 @@
 //! Shared, physical-pixel desktop selector. The Win32 window and loop live on the caller's worker.
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, TryRecvError};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmFlush, DwmGetWindowAttribute,
@@ -14,16 +16,23 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, w};
 
+#[path = "region_elements.rs"]
+mod elements;
+
 type Region = (i32, i32, i32, i32);
 const MIN_SIDE: i32 = 16;
 const DRAG_THRESHOLD: u32 = 6;
+const ELEMENT_TIMER: usize = 1;
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static WINDOW_CLASS: OnceLock<bool> = OnceLock::new();
 
 #[derive(Default)]
 struct Selection {
     screen: RECT,
-    windows: Vec<RECT>,
+    windows: Vec<(usize, RECT)>,
+    cursor: Option<POINT>,
+    components: HashMap<usize, Vec<elements::Component>>,
+    pending: Option<(usize, Receiver<Vec<elements::Component>>)>,
     hover: Option<RECT>,
     start: Option<POINT>,
     drag: Option<RECT>,
@@ -104,11 +113,45 @@ impl Drop for PaintBuffer {
 
 impl Selection {
     fn update_hover(&mut self, point: POINT) {
+        self.cursor = Some(point);
         self.hover = Some(
-            window_at(&self.windows, point)
-                .or_else(|| monitor_at(point))
-                .unwrap_or(self.screen),
+            if let Some((window, bounds)) = window_at(&self.windows, point) {
+                if let Some(components) = self.components.get(&window) {
+                    elements::component_at(components, point).unwrap_or(bounds)
+                } else {
+                    if self.pending.is_none() {
+                        self.pending =
+                            elements::request(window, bounds).map(|result| (window, result));
+                    }
+                    bounds
+                }
+            } else {
+                monitor_at(point).unwrap_or(self.screen)
+            },
         );
+    }
+
+    fn poll_components(&mut self) -> Option<RECT> {
+        let point = self.cursor.filter(|_| self.start.is_none())?;
+        if let Some((window, receiver)) = &self.pending {
+            let components = match receiver.try_recv() {
+                Ok(components) => components,
+                Err(TryRecvError::Empty) => return None,
+                Err(TryRecvError::Disconnected) => Vec::new(),
+            };
+            self.components.insert(*window, components);
+            self.pending = None;
+        } else if let Some((window, bounds)) = window_at(&self.windows, point) {
+            if !self.components.contains_key(&window) {
+                self.pending = elements::request(window, bounds).map(|result| (window, result));
+            }
+            return None;
+        } else {
+            return None;
+        }
+        let before = self.client_selection();
+        self.update_hover(point);
+        changed_area(before, self.client_selection())
     }
 
     fn update_drag(&mut self, point: POINT) {
@@ -221,6 +264,7 @@ unsafe fn select() -> windows::core::Result<Option<Region>> {
             render(hwnd, None)?;
             let _ = ShowWindow(hwnd, SW_SHOW);
             super::pin::activate_native_window(hwnd);
+            SetTimer(Some(hwnd), ELEMENT_TIMER, 32, None);
             let mut message = MSG::default();
             while IsWindow(Some(hwnd)).as_bool() {
                 match GetMessageW(&mut message, None, 0, 0).0 {
@@ -262,11 +306,11 @@ fn intersection(a: RECT, b: RECT) -> Option<RECT> {
         .then_some(rect)
 }
 
-fn visible_windows(screen: RECT) -> Vec<RECT> {
+fn visible_windows(screen: RECT) -> Vec<(usize, RECT)> {
     unsafe extern "system" fn collect(hwnd: HWND, data: LPARAM) -> BOOL {
-        let windows = unsafe { &mut *(data.0 as *mut Vec<RECT>) };
+        let windows = unsafe { &mut *(data.0 as *mut Vec<(usize, RECT)>) };
         if let Some(bounds) = window_bounds(hwnd) {
-            windows.push(bounds);
+            windows.push((hwnd.0 as usize, bounds));
         }
         true.into()
     }
@@ -275,13 +319,13 @@ fn visible_windows(screen: RECT) -> Vec<RECT> {
     let _ = unsafe {
         EnumWindows(
             Some(collect),
-            LPARAM(&mut windows as *mut Vec<RECT> as isize),
+            LPARAM(&mut windows as *mut Vec<(usize, RECT)> as isize),
         )
     };
     windows
         .into_iter()
-        .filter_map(|rect| intersection(rect, screen))
-        .filter(|&rect| selection_region(rect).is_some())
+        .filter_map(|(hwnd, rect)| intersection(rect, screen).map(|rect| (hwnd, rect)))
+        .filter(|&(_, rect)| selection_region(rect).is_some())
         .collect()
 }
 
@@ -291,7 +335,10 @@ fn window_bounds(hwnd: HWND) -> Option<RECT> {
             return None;
         }
         let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-        if style & WS_EX_TRANSPARENT.0 != 0 {
+        // Layered, non-activating tool windows include desktop overlays whose
+        // click-through behavior comes from hit testing instead of the style bit.
+        let overlay = (WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW).0;
+        if style & WS_EX_TRANSPARENT.0 != 0 || style & overlay == overlay {
             return None;
         }
         let mut class = [0_u16; 64];
@@ -334,10 +381,15 @@ fn window_bounds(hwnd: HWND) -> Option<RECT> {
     }
 }
 
-fn window_at(windows: &[RECT], point: POINT) -> Option<RECT> {
-    windows.iter().copied().find(|rect| {
-        (rect.left..rect.right).contains(&point.x) && (rect.top..rect.bottom).contains(&point.y)
-    })
+fn contains(rect: RECT, point: POINT) -> bool {
+    (rect.left..rect.right).contains(&point.x) && (rect.top..rect.bottom).contains(&point.y)
+}
+
+fn window_at(windows: &[(usize, RECT)], point: POINT) -> Option<(usize, RECT)> {
+    windows
+        .iter()
+        .copied()
+        .find(|&(_, rect)| contains(rect, point))
 }
 
 fn monitor_at(point: POINT) -> Option<RECT> {
@@ -381,6 +433,14 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             }
             WM_KEYDOWN | WM_SYSKEYDOWN if wp.0 == usize::from(VK_ESCAPE.0) => {
                 cancel(hwnd);
+            }
+            WM_TIMER if wp.0 == ELEMENT_TIMER => {
+                let dirty = SELECTION.with(|cell| cell.borrow_mut().poll_components());
+                if let Some(rect) = dirty
+                    && render(hwnd, Some(rect)).is_err()
+                {
+                    cancel(hwnd);
+                }
             }
             WM_LBUTTONDOWN => {
                 let selection = SELECTION.with(|cell| {
@@ -590,7 +650,8 @@ mod tests {
             bottom: 100,
         };
         let mut state = Selection {
-            windows: vec![front, back],
+            windows: vec![(1, front), (2, back)],
+            components: HashMap::from([(1, Vec::new()), (2, Vec::new())]),
             ..Default::default()
         };
         state.update_hover(origin);
@@ -629,6 +690,145 @@ mod tests {
         state.update_drag(POINT { x: 20, y: 20 });
         assert!(state.drag.is_some());
         assert_eq!(state.drag.and_then(selection_region), None);
+    }
+
+    #[test]
+    #[ignore = "opens the live Windows desktop overlay"]
+    fn native_selector_snaps_to_webview_row() {
+        use std::time::{Duration, Instant};
+        use windows::core::PCWSTR;
+
+        let expected: Vec<i32> = std::env::var("NEXTGESTURES_TEST_ROW")
+            .expect("set NEXTGESTURES_TEST_ROW to a visible gesture row's x,y,width,height")
+            .split(',')
+            .map(|value| value.parse().unwrap())
+            .collect();
+        let [x, y, width, height] = expected[..] else {
+            panic!("expected four coordinates")
+        };
+        let _dpi = Session(unsafe {
+            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+        });
+        let app = HWND(
+            std::env::var("NEXTGESTURES_TEST_HWND")
+                .expect("set NEXTGESTURES_TEST_HWND to the NextGestures main window handle")
+                .parse::<usize>()
+                .unwrap() as *mut _,
+        );
+        struct RestoreWindow {
+            hwnd: HWND,
+            visible: bool,
+            topmost: bool,
+        }
+        impl Drop for RestoreWindow {
+            fn drop(&mut self) {
+                let _ = unsafe {
+                    SetWindowPos(
+                        self.hwnd,
+                        Some(if self.topmost {
+                            HWND_TOPMOST
+                        } else {
+                            HWND_NOTOPMOST
+                        }),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE
+                            | SWP_NOSIZE
+                            | SWP_NOACTIVATE
+                            | if self.visible {
+                                SET_WINDOW_POS_FLAGS(0)
+                            } else {
+                                SWP_HIDEWINDOW
+                            },
+                    )
+                };
+            }
+        }
+        let _restore = unsafe {
+            RestoreWindow {
+                hwnd: app,
+                visible: IsWindowVisible(app).as_bool(),
+                topmost: GetWindowLongW(app, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0,
+            }
+        };
+        unsafe {
+            SetWindowPos(
+                app,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            )
+            .unwrap();
+        }
+        let cursor = POINT {
+            x: x + width / 2,
+            y: y + height / 2,
+        };
+        let bounds = window_bounds(app).unwrap_or_else(|| unsafe {
+            panic!(
+                "fixture HWND {app:?} is not selectable, visible={:?}, minimized={:?}, style={:#x}",
+                IsWindowVisible(app),
+                IsIconic(app),
+                GetWindowLongW(app, GWL_EXSTYLE)
+            )
+        });
+        let components = elements::request(app.0 as usize, bounds)
+            .unwrap()
+            .recv_timeout(Duration::from_secs(4))
+            .unwrap();
+        assert_eq!(
+            elements::component_at(&components, cursor).and_then(selection_region),
+            Some((x, y, width, height)),
+            "WebView candidates for {bounds:?}: {components:?}",
+        );
+        let worker = std::thread::spawn(select_region);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let hwnd = loop {
+            if let Ok(hwnd) =
+                unsafe { FindWindowW(w!("NextGesturesRegionSelector"), PCWSTR::null()) }
+                && unsafe { IsWindowVisible(hwnd).as_bool() }
+            {
+                break hwnd;
+            }
+            assert!(Instant::now() < deadline, "selector did not open");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let mut desktop = RECT::default();
+        unsafe { GetWindowRect(hwnd, &mut desktop) }.unwrap();
+        let position =
+            LPARAM(((cursor.x - desktop.left) | ((cursor.y - desktop.top) << 16)) as isize);
+        let outline_visible = loop {
+            let pixel = unsafe {
+                SendMessageW(hwnd, WM_MOUSEMOVE, None, Some(position));
+                let dc = GetDC(None);
+                let pixel = GetPixel(dc, x + 1, cursor.y);
+                ReleaseDC(None, dc);
+                pixel
+            };
+            if pixel == COLORREF(0x00ff_d255) || Instant::now() >= deadline {
+                break pixel == COLORREF(0x00ff_d255);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        unsafe {
+            PostMessageW(Some(hwnd), WM_LBUTTONDOWN, WPARAM(1), position).unwrap();
+            PostMessageW(Some(hwnd), WM_LBUTTONUP, WPARAM(0), position).unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !worker.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !worker.is_finished() {
+            let _ = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+            panic!("selector did not close");
+        }
+        assert_eq!(worker.join().unwrap().unwrap(), Some((x, y, width, height)));
+        assert!(outline_visible, "the component's outline did not appear");
     }
 
     #[test]
