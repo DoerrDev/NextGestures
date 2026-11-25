@@ -141,9 +141,6 @@ fn shortcut_bindings(config: &Config, strict: bool) -> Result<Vec<hotkey::Bindin
             let parsed = (|| {
                 let chord = hotkey::Chord::parse(&gesture.hotkey)
                     .with_context(|| format!("快捷键 [{label}]"))?;
-                if chord.is_unmodified() {
-                    bail!("快捷键 [{label}]: 请同时按住 Ctrl、Alt、Shift 或 Win 中的至少一个修饰键");
-                }
                 if Some(chord) == toggle_chord {
                     bail!("快捷键 {label} 已被用作总开关快捷键，请换一个组合");
                 }

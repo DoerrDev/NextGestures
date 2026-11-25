@@ -5,16 +5,13 @@ import { check, type Update } from '@tauri-apps/plugin-updater'
 import {
   AppWindow,
   Ban,
+  Check,
   Copy,
   Globe,
-  LayoutGrid,
-  List,
   MoreHorizontal,
-  Pencil,
   Plus,
   Power,
   PowerOff,
-  Search,
   Trash2,
   TriangleAlert,
   Zap,
@@ -50,9 +47,6 @@ const TRIGGER_LABEL: Record<string, string> = {
   X2: '侧键 2',
 }
 
-type Filter = 'all' | 'on' | 'off'
-type View = 'list' | 'card'
-
 export function App() {
   const [config, setConfig] = useState<Config | null>(null)
   const [configPath, setConfigPath] = useState('')
@@ -64,25 +58,15 @@ export function App() {
   const [enabled, setEnabled] = useState(true)
   const [toast, setToast] = useState('')
   const [confirmRemove, setConfirmRemove] = useState<Profile | null>(null)
+  const [menuId, setMenuId] = useState('')
   const [update, setUpdate] = useState<Update | null>(null)
   const [versionOpen, setVersionOpen] = useState(false)
   const [updateStatus, setUpdateStatus] = useState<'checking' | 'checked' | 'failed'>('checking')
   const checkingUpdate = useRef(false)
   const [version, setVersion] = useState('')
   const [hotkeyFailures, setHotkeyFailures] = useState<string[]>([])
-  const [query, setQuery] = useState('')
-  const [filter, setFilter] = useState<Filter>('all')
-  const [menuId, setMenuId] = useState('')
-  const [view, setView] = useState<View>(
-    () => (localStorage.getItem('view') === 'card' ? 'card' : 'list'),
-  )
 
   const [paneW, setPaneW] = useState(() => Number(localStorage.getItem('paneW')) || 400)
-
-  const switchView = (v: View) => {
-    setView(v)
-    localStorage.setItem('view', v)
-  }
 
   /** 拖动分隔条调整右侧编辑面板宽度 */
   const startResize = (e: React.PointerEvent) => {
@@ -182,21 +166,10 @@ export function App() {
 
   if (!config || !active) return null
 
-  const onCount = active.gestures.filter((g) => g.enabled).length
   const activePassthrough = !!active.exe && !!active.passthrough
   const totalGestures = config.profiles.reduce((n, p) => n + p.gestures.length, 0)
-  const offCount = active.gestures.length - onCount
 
-  const needle = query.trim().toLowerCase()
-  const shown = active.gestures.filter((g) => {
-    if (filter === 'on' && !g.enabled) return false
-    if (filter === 'off' && g.enabled) return false
-    if (!needle) return true
-    const keys = g.hotkey ?? []
-    return `${g.name} ${describeAction(g.action)} ${hotkeyLabel(keys)} ${keys.join('+')}`
-      .toLowerCase()
-      .includes(needle)
-  })
+  const shown = active.gestures
 
   const guard = async (fn: () => Promise<void>) => {
     try {
@@ -210,17 +183,9 @@ export function App() {
   /** 失败时把后端的错误抛回编辑面板，由面板内联显示 */
   const saveGesture = async (gesture: Gesture) => {
     await api.upsertGesture(active.id, gesture)
-    setEditing(view === 'list' ? { gesture, isNew: false } : null)
+    setEditing({ gesture, isNew: false })
     flash(t('saved'))
     await reload().catch((e) => flash(String(e)))
-  }
-
-  const setPassthrough = (passthrough: boolean) => {
-    if (passthrough === activePassthrough) return
-    void guard(async () => {
-      await api.setProfilePassthrough(active.id, passthrough)
-      flash(passthrough ? t('passthroughOn') : t('passthroughOff'))
-    })
   }
 
   const openDocs = () => void openExternal(DOCS_URL).catch((e) => flash(String(e)))
@@ -245,18 +210,11 @@ export function App() {
   }
 
   const addGesture = () => {
-    switchView('list')
     setEditing({ gesture: emptyGesture(), isNew: true })
   }
 
   const duplicateGesture = (g: Gesture) => {
-    switchView('list')
     setEditing({ gesture: cloneGesture(g, t('copySuffix')), isNew: true })
-  }
-
-  const editGesture = (g: Gesture) => {
-    switchView('list')
-    setEditing({ gesture: g, isNew: false })
   }
 
   /** 触发键与滚轮合并成一枚徽标 */
@@ -339,17 +297,59 @@ export function App() {
                 {p.exe && p.passthrough && <Ban size={14} className="prof-icon" aria-label={t('passthroughOn')} />}
                 <small>{p.gestures.length}</small>
                 {p.exe && (
-                  <button
-                    type="button"
-                    className="btn-icon prof-del"
-                    title={t('removeProfile')}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      setConfirmRemove(p)
-                    }}
-                  >
-                    <Trash2 size={14} strokeWidth={2} />
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      className={menuId === p.id ? 'btn-icon prof-del open' : 'btn-icon prof-del'}
+                      title={t('more')}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setMenuId(menuId === p.id ? '' : p.id)
+                      }}
+                    >
+                      <MoreHorizontal size={14} strokeWidth={2} />
+                    </button>
+                    {menuId === p.id && (
+                      <>
+                        <div
+                          className="prof-menu-mask"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setMenuId('')
+                          }}
+                        />
+                        <div className="prof-menu" onClick={(e) => e.stopPropagation()}>
+                          {([false, true] as const).map((pass) => (
+                            <button
+                              key={String(pass)}
+                              type="button"
+                              onClick={() => {
+                                setMenuId('')
+                                void guard(async () => {
+                                  await api.setProfilePassthrough(p.id, pass)
+                                  flash(pass ? t('passthroughOn') : t('passthroughOff'))
+                                })
+                              }}
+                            >
+                              <Check size={13} strokeWidth={2.4} className={!!p.passthrough === pass ? '' : 'hid'} />
+                              {pass ? t('modePassthrough') : t('modeNative')}
+                            </button>
+                          ))}
+                          <button
+                            type="button"
+                            className="danger"
+                            onClick={() => {
+                              setMenuId('')
+                              setConfirmRemove(p)
+                            }}
+                          >
+                            <Trash2 size={13} strokeWidth={2} />
+                            {t('removeProfile')}
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </>
                 )}
               </div>
             ))}
@@ -361,85 +361,6 @@ export function App() {
         </aside>
 
         <main className={activePassthrough ? 'main dim' : 'main'}>
-          <div className="head">
-            <h1>{t('gestureList')}</h1>
-            <p className="subtitle">{active.exe || t('globalHint')}</p>
-            {active.exe && (
-              <div className="segs pmode" role="radiogroup" aria-label={t('profileMode')}>
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={!activePassthrough}
-                  className={activePassthrough ? '' : 'on'}
-                  onClick={() => setPassthrough(false)}
-                >
-                  {t('modeNative')}
-                </button>
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={activePassthrough}
-                  className={activePassthrough ? 'on' : ''}
-                  onClick={() => setPassthrough(true)}
-                >
-                  {t('modePassthrough')}
-                </button>
-              </div>
-            )}
-
-            <div className="search">
-              <Search size={14} strokeWidth={2} />
-              <input
-                type="text"
-                value={query}
-                placeholder={t('search')}
-                onChange={(e) => setQuery(e.target.value)}
-              />
-            </div>
-
-            <div className="segs">
-              {(
-                [
-                  ['all', t('filterAll'), active.gestures.length],
-                  ['on', t('filterOn'), onCount],
-                  ['off', t('filterOff'), offCount],
-                ] as [Filter, string, number][]
-              ).map(([key, label, n]) => (
-                <button
-                  key={key}
-                  type="button"
-                  className={filter === key ? 'on' : ''}
-                  onClick={() => setFilter(key)}
-                >
-                  {label} {n}
-                </button>
-              ))}
-            </div>
-
-            <div className="viewtog">
-              <button
-                type="button"
-                className={view === 'list' ? 'on' : ''}
-                title={t('viewList')}
-                onClick={() => switchView('list')}
-              >
-                <List size={15} strokeWidth={2} />
-              </button>
-              <button
-                type="button"
-                className={view === 'card' ? 'on' : ''}
-                title={t('viewCard')}
-                onClick={() => switchView('card')}
-              >
-                <LayoutGrid size={15} strokeWidth={2} />
-              </button>
-            </div>
-
-            <button type="button" className="btn-primary" onClick={addGesture}>
-              <Plus size={16} strokeWidth={2} />
-              {t('addGesture')}
-            </button>
-          </div>
 
           {activePassthrough && (
             <div className="banner" role="status">
@@ -466,7 +387,6 @@ export function App() {
             </div>
           )}
 
-          {view === 'list' ? (
             <div className="split" style={{ gridTemplateColumns: `1fr 8px ${paneW}px` }}>
               <div className="rows">
                 <div className="rows-head">
@@ -594,7 +514,7 @@ export function App() {
 
                   {shown.length === 0 && !editing?.isNew && (
                     <div className="empty">
-                      {active.gestures.length === 0 ? t('noGesture') : t('noMatch')}
+                      {t('noGesture')}
                     </div>
                   )}
                 </div>
@@ -633,139 +553,6 @@ export function App() {
                 </aside>
               )}
             </div>
-          ) : (
-          <div className="cards">
-            {active.gestures.length === 0 ? (
-              <div className="empty">{t('noGesture')}</div>
-            ) : shown.length === 0 ? (
-              <div className="empty">{t('noMatch')}</div>
-            ) : (
-              <>
-                {shown.map((g) => (
-                  <article
-                    key={g.id}
-                    className={[
-                      'card',
-                      g.enabled ? '' : 'off',
-                      conflicts.ids.has(g.id) ? 'clash' : '',
-                    ]
-                      .filter(Boolean)
-                      .join(' ')}
-                  >
-                    <div className="card-head">
-                      {isHotkeyOnly(g) ? (
-                        <HotkeyThumb className="thumb" />
-                      ) : (
-                        <StrokeCanvas
-                          className="thumb"
-                          points={g.points}
-                          times={g.times}
-                          trigger={g.trigger}
-                          leftClick={g.left_click}
-                          region={g.region}
-                          wheel={g.wheel}
-                          color={g.enabled ? config.settings.trail_color : '#a1a1a1'}
-                          width={4}
-                        />
-                      )}
-                      {!g.enabled && <span className="flag">{t('disabled')}</span>}
-                      {g.enabled && conflicts.ids.has(g.id) && (
-                        <span className="flag warn">
-                          <TriangleAlert size={11} strokeWidth={2.4} />
-                          {t('conflict')}
-                        </span>
-                      )}
-                      <button
-                        type="button"
-                        className="card-more"
-                        title={t('more')}
-                        onClick={() => setMenuId(menuId === g.id ? '' : g.id)}
-                      >
-                        <MoreHorizontal size={15} strokeWidth={2} />
-                      </button>
-                      {menuId === g.id && (
-                        <>
-                          <div className="card-menu-mask" onClick={() => setMenuId('')} />
-                          <div className="card-menu">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setMenuId('')
-                                duplicateGesture(g)
-                              }}
-                            >
-                              <Copy size={13} strokeWidth={2} />
-                              {t('duplicate')}
-                            </button>
-                            <button
-                              type="button"
-                              className="danger"
-                              disabled={!g.deletable}
-                              title={g.deletable ? '' : t('notDeletable')}
-                              onClick={() => {
-                                setMenuId('')
-                                void guard(() => api.removeGesture(active.id, g.id))
-                              }}
-                            >
-                              <Trash2 size={13} strokeWidth={2} />
-                              {t('remove')}
-                            </button>
-                          </div>
-                        </>
-                      )}
-                    </div>
-
-                    <div className="card-title">{g.name}</div>
-
-                    <div className="meta">
-                      {triggerChip(g) && (
-                        <span className={g.enabled ? 'tag blue' : 'tag mute'}>{triggerChip(g)}</span>
-                      )}
-                      {g.region && (
-                        <span className={g.enabled ? 'tag' : 'tag mute'}>
-                          {t(`region${g.region}`)}
-                        </span>
-                      )}
-                      {hotkeyTag(g)}
-                      {g.fire_mode === 'Immediate' && hasMouseTrigger(g) && (
-                        <span className="tag yellow">{t('immediate')}</span>
-                      )}
-                    </div>
-
-                    <div className={g.action.kind === 'open_url' ? 'card-desc url' : 'card-desc'}>
-                      {describeAction(g.action)}
-                    </div>
-
-                    <div className="card-acts">
-                      <button
-                        type="button"
-                        className="btn-ghost"
-                        onClick={() => editGesture(g)}
-                      >
-                        <Pencil size={14} strokeWidth={2} />
-                        {t('edit')}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn-ghost"
-                        onClick={() =>
-                          void guard(() => api.setGestureEnabled(active.id, g.id, !g.enabled))
-                        }
-                      >
-                        {g.enabled ? <PowerOff size={14} strokeWidth={2} /> : <Power size={14} strokeWidth={2} />}
-                        {g.enabled ? t('disable') : t('enable')}
-                      </button>
-                    </div>
-                  </article>
-                ))}
-                <button type="button" className="card add" onClick={addGesture}>
-                  <Plus size={26} strokeWidth={1.6} />
-                  {t('drawNew')}
-                </button>
-              </>
-            )}
-          </div>
-          )}
         </main>
       </div>
 

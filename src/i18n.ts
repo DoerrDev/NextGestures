@@ -210,7 +210,7 @@ const zhCN = {
   recordHintShort: '右键画完后在终点点一下左键，可录成左键收尾。',
   gestureGuide: '手势设置指南 ↗',
   hotkeyGuide: '快捷键说明 ↗',
-  hotkeyTriggerHint: '需要包含 Ctrl / Alt / Shift / Win 中的至少一个。只在当前配置组生效，程序配置优先于全局。',
+  hotkeyTriggerHint: '可直接使用 F1 等单键，也可组合 Ctrl / Alt / Shift / Win。只在当前配置组生效，程序配置优先于全局。',
   hotkeyBusy: '这个组合键已被其他程序占用，NextGestures 收不到。换一个组合键试试。',
   hotkeyOnly: '仅快捷键',
   noStrokeYet: '还没有手势',

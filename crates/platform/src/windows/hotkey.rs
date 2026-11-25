@@ -32,10 +32,6 @@ impl Chord {
         Ok(Self(mods.0, key.context("请选择一个主键")?))
     }
 
-    pub fn is_unmodified(self) -> bool {
-        self.0 == 0
-    }
-
     pub fn wait_for_release(self) -> bool {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let pressed = |key| unsafe { GetAsyncKeyState(key) < 0 };
@@ -257,7 +253,7 @@ mod tests {
         );
         assert!(parse(&["ctrl"]).is_err());
         assert!(parse(&["ctrl", "s", "t"]).is_err());
-        assert!(parse(&["f1"]).unwrap().is_unmodified());
+        assert!(parse(&["f1"]).is_ok());
     }
 }
 
