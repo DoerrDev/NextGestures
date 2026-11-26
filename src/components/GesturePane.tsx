@@ -34,6 +34,7 @@ import { HotkeyRecorder } from './HotkeyRecorder'
 import { StrokeCanvas } from './StrokeCanvas'
 
 interface Props {
+  aiActions: import('../api').AiAction[]
   initial: Gesture
   isNew: boolean
   /** 保存失败时 reject，错误文案显示在面板内 */
@@ -62,6 +63,7 @@ const DEFAULT_DWELL_MS = 600
 
 export function GesturePane({
   initial,
+  aiActions,
   isNew,
   onSave,
   onClose,
@@ -180,7 +182,7 @@ export function GesturePane({
   const onReleaseOnly =
     draft.left_click ||
     edgeNoRecord ||
-    ['screenshot', 'record_region', 'ai_jyutping', 'ai_translate', 'ai_polish'].includes(draft.action.kind)
+    ['screenshot', 'record_region', 'ai_jyutping', 'ai_translate', 'ai_polish', 'ai_custom'].includes(draft.action.kind)
   const hotkeyBusy = hotkeySet && hotkeyFailures.includes(hotkeyLabel(hotkey))
 
   const setEdgeMode = (mode: EdgeMode) => {
@@ -485,7 +487,7 @@ export function GesturePane({
         </div>
 
         <div className="pane-sect-line">{t('actionShared')}</div>
-        <ActionEditor
+        <ActionEditor aiActions={aiActions}
           action={draft.action}
           onChange={(action) => setDraft((current) => ({ ...current, action }))}
           onError={setError}

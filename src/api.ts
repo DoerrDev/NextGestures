@@ -29,6 +29,7 @@ export type Action =
   | { kind: 'record_region' }
   | { kind: 'ai_jyutping' }
   | { kind: 'ai_translate' }
+  | { kind: 'ai_custom'; id: string }
   | { kind: 'ai_polish' }
   | { kind: 'command'; program: string; args: string[]; shell: boolean }
   | { kind: 'launch_app'; app_id: string; name: string }
@@ -94,7 +95,17 @@ export interface Config {
   profiles: Profile[]
 }
 
+export interface AiAction {
+  id: string
+  name: string
+  prompt: string
+  mode: 'bubble' | 'replace'
+  /** lucide 图标名（PascalCase），空表示默认 */
+  icon?: string
+}
+
 export interface AiSettings {
+  actions: AiAction[]
   base_url: string
   api_key: string
   model: string

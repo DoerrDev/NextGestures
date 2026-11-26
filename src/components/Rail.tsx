@@ -1,9 +1,12 @@
 import type { Update } from '@tauri-apps/plugin-updater'
-import { BookOpen, Settings2, Spline } from 'lucide-react'
+import { BookOpen, Settings2, Sparkles, Spline } from 'lucide-react'
 import { t } from '../i18n'
 
 interface Props {
+  page: 'gestures' | 'ai'
+  onPage: (page: 'gestures' | 'ai') => void
   gestureCount: number
+  aiCount: number
   enabled: boolean
   onToggleEnabled: () => void
   unread: number
@@ -16,7 +19,10 @@ interface Props {
 
 /** 左侧导航栏：上面是页面导航，下面是总开关、文档、设置和版本号 */
 export function Rail({
+  page,
+  onPage,
   gestureCount,
+  aiCount,
   enabled,
   onToggleEnabled,
   unread,
@@ -31,10 +37,17 @@ export function Rail({
       <span className="rail-logo" aria-hidden="true">
         N
       </span>
-      <button type="button" className="rail-nav on" aria-current="page">
+      <button type="button" className={page === 'gestures' ? 'rail-nav on' : 'rail-nav'}
+        aria-current={page === 'gestures' ? 'page' : undefined} onClick={() => onPage('gestures')}>
         <Spline size={19} strokeWidth={2} />
         {t('navGestures')}
         <span className="rail-badge">{gestureCount}</span>
+      </button>
+      <button type="button" className={page === 'ai' ? 'rail-nav on' : 'rail-nav'}
+        aria-current={page === 'ai' ? 'page' : undefined} onClick={() => onPage('ai')}>
+        <Sparkles size={19} strokeWidth={2} />
+        {t('navAi')}
+        <span className="rail-badge">{aiCount}</span>
       </button>
 
       <span className="rail-grow" />

@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
-import { Check, Info, MessageCircle, MessageSquareText, MousePointer2, Pipette, Sparkles, Spline, X } from 'lucide-react'
-import { api, TRIGGERS, type AiSettings, type Point, type Settings, type TriggerButton, type VirtualScreenSize } from '../api'
+import { Check, Info, MessageCircle, MessageSquareText, MousePointer2, Pipette, Spline, X } from 'lucide-react'
+import { api, TRIGGERS, type Point, type Settings, type TriggerButton, type VirtualScreenSize } from '../api'
 import { t, type Key } from '../i18n'
 import { HotkeyRecorder } from './HotkeyRecorder'
 import { StrokeCanvas } from './StrokeCanvas'
 import { FeedbackPane } from './FeedbackPane'
+
 
 interface Props {
   initial: Settings
@@ -50,7 +51,6 @@ const TABS: { id: string; label: Key; icon: typeof Info }[] = [
   { id: 'trigger', label: 'tabTrigger', icon: MousePointer2 },
   { id: 'trail', label: 'tabTrail', icon: Spline },
   { id: 'hint', label: 'tabHint', icon: MessageSquareText },
-  { id: 'ai', label: 'tabAi', icon: Sparkles },
   { id: 'feedback', label: 'tabFeedback', icon: MessageCircle },
   { id: 'about', label: 'tabAbout', icon: Info },
 ]
@@ -113,6 +113,11 @@ function ColorField({
 
 export function SettingsDialog({ initial, configPath, unread, onSave, onClose }: Props) {
   const [s, setS] = useState<Settings>(initial)
+  const [error, setError] = useState('')
+  const save = () => {
+    setError('')
+    onSave(s)
+  }
   const [tab, setTab] = useState('trigger')
   const [autostart, setAutostart] = useState(false)
   const [screenSize, setScreenSize] = useState<VirtualScreenSize>({ width: 1920, height: 1080 })
@@ -154,9 +159,6 @@ export function SettingsDialog({ initial, configPath, unread, onSave, onClose }:
 
   const xLimit = Math.floor(screenSize.width / 2)
   const yLimit = Math.floor(screenSize.height / 2)
-  const setAiField = <K extends keyof AiSettings,>(field: K, value: AiSettings[K]) => {
-    setS((current) => ({ ...current, ai: { ...current.ai, [field]: value } }))
-  }
 
   return (
     <div className="mask" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
@@ -408,51 +410,6 @@ export function SettingsDialog({ initial, configPath, unread, onSave, onClose }:
               </>
             )}
 
-            {tab === 'ai' && (
-              <>
-                <div className="field">
-                  <label htmlFor="ai-base-url">{t('aiBaseUrl')}</label>
-                  <input
-                    id="ai-base-url"
-                    type="url"
-                    value={s.ai.base_url}
-                    onChange={(e) => setAiField('base_url', e.target.value)}
-                    placeholder="https://api.openai.com/v1"
-                    spellCheck={false}
-                  />
-                </div>
-                <div className="field">
-                  <label htmlFor="ai-api-key">{t('aiApiKey')}</label>
-                  <input
-                    id="ai-api-key"
-                    type="password"
-                    value={s.ai.api_key}
-                    onChange={(e) => setAiField('api_key', e.target.value)}
-                    autoComplete="off"
-                  />
-                </div>
-                <div className="field">
-                  <label htmlFor="ai-model">{t('aiModel')}</label>
-                  <input
-                    id="ai-model"
-                    type="text"
-                    value={s.ai.model}
-                    onChange={(e) => setAiField('model', e.target.value)}
-                    spellCheck={false}
-                  />
-                </div>
-                <label className="check field">
-                  <input
-                    type="checkbox"
-                    checked={s.ai.show_polish_notes}
-                    onChange={(e) => setAiField('show_polish_notes', e.target.checked)}
-                  />
-                  {t('aiShowPolishNotes')}
-                </label>
-                <p className="field-note">{t('aiActionHint')}</p>
-              </>
-            )}
-
             {tab === 'feedback' && (
               <FeedbackPane
                 nickname={s.feedback_nickname}
@@ -484,7 +441,8 @@ export function SettingsDialog({ initial, configPath, unread, onSave, onClose }:
           <button type="button" className="btn-outline subtle" onClick={onClose}>
             {t('cancel')}
           </button>
-          <button type="button" className="btn-primary" onClick={() => onSave(s)}>
+          {error && <span role="alert">{error}</span>}
+          <button type="button" className="btn-primary" onClick={() => save()}>
             <Check size={16} strokeWidth={2} />
             {t('save')}
           </button>

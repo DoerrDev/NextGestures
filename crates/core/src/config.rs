@@ -97,6 +97,7 @@ pub enum Action {
     AiJyutping,
     AiTranslate,
     AiPolish,
+    AiCustom { id: String },
     /// 通过 Windows AppsFolder 打开已登记的应用
     LaunchApp { app_id: String, name: String },
     /// 执行程序 / CMD 命令
@@ -151,7 +152,7 @@ impl Gesture {
 
 impl Action {
     pub fn is_ai(&self) -> bool {
-        matches!(self, Self::AiJyutping | Self::AiTranslate | Self::AiPolish)
+        matches!(self, Self::AiJyutping | Self::AiTranslate | Self::AiPolish | Self::AiCustom { .. })
     }
 }
 
@@ -288,12 +289,28 @@ impl Default for Settings {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultMode { Bubble, Replace }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiAction {
+    pub id: String,
+    pub name: String,
+    pub prompt: String,
+    pub mode: ResultMode,
+    /// lucide 图标名（PascalCase），空串表示使用默认图标
+    #[serde(default)]
+    pub icon: String,
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AiSettings {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    pub actions: Vec<AiAction>,
     pub show_polish_notes: bool,
 }
 
@@ -303,6 +320,7 @@ impl Default for AiSettings {
             base_url: String::new(),
             api_key: String::new(),
             model: String::new(),
+            actions: Vec::new(),
             show_polish_notes: true,
         }
     }
@@ -611,6 +629,7 @@ fn describe_action(action: &Action) -> String {
         Action::None => "快捷键".into(),
         Action::Screenshot => "截图".into(),
         Action::RecordRegion => "区域录屏".into(),
+        Action::AiCustom { .. } => "AI 动作".into(),
         Action::AiJyutping => "粤拼".into(),
         Action::AiTranslate => "AI 翻译".into(),
         Action::AiPolish => "AI 润色".into(),

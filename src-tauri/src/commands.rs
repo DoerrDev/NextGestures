@@ -79,6 +79,17 @@ fn update(state: &AppState, f: impl FnOnce(&mut Config) -> anyhow::Result<()>) -
 #[tauri::command]
 pub fn save_settings(app: AppHandle, state: State<AppState>, settings: Settings) -> R<()> {
     update(&state, |cfg| {
+        let mut ids = std::collections::HashSet::new();
+        for a in &settings.ai.actions {
+            anyhow::ensure!(!a.id.is_empty() && ids.insert(a.id.as_str()), "AI 动作 ID 无效或重复");
+            anyhow::ensure!(!a.name.trim().is_empty() && a.prompt.contains("{{selection}}"), "AI 动作需要名称与选文占位符");
+        }
+        for gesture in cfg.profiles.iter_mut().flat_map(|p| &mut p.gestures) {
+            if matches!(&gesture.action, Action::AiCustom { id } if !ids.contains(id.as_str())) {
+                gesture.enabled = false;
+                gesture.action = Action::None;
+            }
+        }
         cfg.settings = settings;
         Ok(())
     })?;
@@ -89,7 +100,12 @@ pub fn save_settings(app: AppHandle, state: State<AppState>, settings: Settings)
 
 #[tauri::command]
 pub fn upsert_gesture(state: State<AppState>, profile_id: String, gesture: Gesture) -> R<()> {
-    update(&state, |cfg| cfg.upsert_gesture(&profile_id, gesture))
+    update(&state, |cfg| {
+        if let Action::AiCustom { id } = &gesture.action {
+            anyhow::ensure!(cfg.settings.ai.actions.iter().any(|a| &a.id == id), "AI 动作已删除");
+        }
+        cfg.upsert_gesture(&profile_id, gesture)
+    })
 }
 
 #[tauri::command]

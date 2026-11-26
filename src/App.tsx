@@ -25,6 +25,8 @@ import {
   hotkeyLabel,
   isHotkeyOnly,
   openExternal,
+  type AiAction,
+  type AiSettings,
   type Config,
   type Gesture,
   type Profile,
@@ -33,6 +35,7 @@ import {
 import { findConflicts } from './conflicts'
 import { setLang, t } from './i18n'
 import { describeAction } from './components/ActionEditor'
+import { AiPage } from './components/AiPage'
 import { GesturePane, HotkeyThumb } from './components/GesturePane'
 import { ProfileDialog } from './components/ProfileDialog'
 import { Rail } from './components/Rail'
@@ -49,6 +52,7 @@ const TRIGGER_LABEL: Record<string, string> = {
 
 export function App() {
   const [config, setConfig] = useState<Config | null>(null)
+  const [page, setPage] = useState<'gestures' | 'ai'>('gestures')
   const [configPath, setConfigPath] = useState('')
   const [activeId, setActiveId] = useState('global')
   const [editing, setEditing] = useState<{ gesture: Gesture; isNew: boolean } | null>(null)
@@ -198,17 +202,28 @@ export function App() {
       setActiveId(profile.id)
     })
 
-  const saveSettings = (settings: Settings, bindId?: string) =>
+  const saveSettings = (settings: Settings) =>
     void guard(async () => {
       await api.saveSettings(settings)
       setSettingsOpen(false)
-      const action = settings.ai.actions?.find(a => a.id === bindId)
-      if (action) {
-        if (activePassthrough) setActiveId('global')
-        setEditing({ gesture: { ...emptyGesture(), name: action.name, action: { kind: 'ai_custom', id: action.id } }, isNew: true })
-      }
       flash(t('saved'))
     })
+
+  /** AI 页保存：只改 settings.ai 的指定字段，失败时抛回由页面内联显示 */
+  const saveAi = async (patch: Partial<AiSettings>) => {
+    await api.saveSettings({ ...config.settings, ai: { ...config.settings.ai, ...patch } })
+    await reload()
+    flash(t('saved'))
+  }
+
+  /** 为 AI 动作新建一条手势：跳回手势页并打开新建面板 */
+  const bindAiAction = (id: string) => {
+    const action = (config.settings.ai.actions ?? []).find((a: AiAction) => a.id === id)
+    if (!action) return
+    if (activePassthrough) setActiveId('global')
+    setPage('gestures')
+    setEditing({ gesture: { ...emptyGesture(), name: action.name, action: { kind: 'ai_custom', id: action.id } }, isNew: true })
+  }
 
   const toggleMaster = async (on: boolean) => {
     await api.setEnabled(on)
@@ -253,7 +268,10 @@ export function App() {
   return (
     <div className="shell">
       <Rail
+        page={page}
+        onPage={setPage}
         gestureCount={totalGestures}
+        aiCount={config.settings.ai.actions?.length ?? 0}
         enabled={enabled}
         onToggleEnabled={() => void toggleMaster(!enabled).catch((e) => flash(String(e)))}
         unread={unread}
@@ -267,7 +285,17 @@ export function App() {
         }}
       />
 
-      <div className="board">
+      {page === 'ai' && (
+        <AiPage
+          saved={config.settings.ai}
+          profiles={config.profiles}
+          onSaveActions={(actions) => saveAi({ actions })}
+          onSaveService={saveAi}
+          onBind={bindAiAction}
+        />
+      )}
+
+      <div className="board" hidden={page !== 'gestures'}>
         <aside className="side">
           <div className="side-scroll">
             <div className="side-label">{t('profiles')}</div>
@@ -570,7 +598,6 @@ export function App() {
       )}
       {settingsOpen && (
         <SettingsDialog
-          profiles={config.profiles}
           initial={config.settings}
           unread={unread}
           configPath={configPath}

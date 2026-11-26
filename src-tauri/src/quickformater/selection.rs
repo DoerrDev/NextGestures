@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 use gesture_platform::input;
-use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND, WPARAM, LPARAM};
 use windows::Win32::System::{DataExchange::*, Memory::*};
 use windows::Win32::UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*};
 use windows::core::w;
@@ -44,6 +44,25 @@ impl Target {
 
     pub fn is_current(self) -> bool {
         Self::current() == Some(self)
+    }
+
+    // Win32 Edit and RichEdit expose exact selection offsets and a read-only style.
+    // Other controls get a copyable result instead of a speculative paste.
+    pub fn writable_range(self) -> Option<usize> {
+        unsafe {
+            if !self.is_current() { return None; }
+            let hwnd = HWND(self.focus as _);
+            let mut name = [0u16; 64];
+            let len = GetClassNameW(hwnd, &mut name) as usize;
+            let class = String::from_utf16_lossy(&name[..len]).to_ascii_lowercase();
+            if !(class == "edit" || class.starts_with("richedit"))
+                || GetWindowLongW(hwnd, GWL_STYLE) as u32 & ES_READONLY as u32 != 0
+                || !IsWindowEnabled(hwnd).as_bool() { return None; }
+            let mut range = 0usize;
+            let sent = SendMessageTimeoutW(hwnd, 0x00b0 /* EM_GETSEL */, WPARAM(0), LPARAM(0),
+                SMTO_ABORTIFHUNG, 150, Some(&mut range));
+            (sent.0 != 0 && range as u32 != u32::MAX && (range & 0xffff) < ((range >> 16) & 0xffff)).then_some(range)
+        }
     }
 
     fn owns_clipboard(self) -> bool {

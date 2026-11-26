@@ -1,5 +1,4 @@
 const zhCN = {
-  tabAi: 'AI 设置',
   actionScreenshot: '区域截图并置顶',
   screenshotActionHint: '触发后拖出截图区域。贴图底部可复制、保存或调节透明度。按空格折叠或恢复，双击关闭。',
   actionRecordRegion: '区域录屏',
@@ -182,6 +181,7 @@ const zhCN = {
   close: '关闭',
   docs: '文档',
   navGestures: '手势',
+  navAi: 'AI 动作',
   masterPauseHint: '点击暂停全部手势和快捷键',
   masterResumeHint: '点击恢复全部手势和快捷键',
   docsHint: '在浏览器打开说明文档',

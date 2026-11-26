@@ -65,9 +65,18 @@ fn complete(
 ) -> Result<Completion> {
     let kind = if mode == Mode::Jyutping {
         Kind::Yueping
+    } else if matches!(mode, Mode::CustomBubble(_) | Mode::CustomReplace(_)) {
+        Kind::Result
     } else {
         Kind::Translation
     };
+    if matches!(mode, Mode::CustomBubble(_) | Mode::CustomReplace(_)) {
+        ensure!(!output.trim().is_empty(), "AI 返回了空内容");
+        if matches!(mode, Mode::CustomReplace(_)) && (output == source || replace(output)) {
+            return Ok(Completion::Silent);
+        }
+        return Ok(Completion::Card(Kind::Result, output.to_owned(), 0));
+    }
     if mode != Mode::Polish {
         let text = clean_output(source, output);
         ensure!(!text.trim().is_empty(), "AI 返回了空内容");
@@ -130,6 +139,7 @@ pub(super) fn run(
                 let _ = send.send(rect);
             }
         });
+    let range = matches!(mode, Mode::CustomReplace(_)).then(|| target.writable_range()).flatten();
     let captured = selection::capture(owner, target);
     let anchor = receive
         .recv_timeout(Duration::from_millis(200))
@@ -162,14 +172,14 @@ pub(super) fn run(
             };
             let result = request(&config, url, mode, &worker_source, |delta| {
                 ensure!(!worker_cancelled.load(Ordering::Acquire), "请求已取消");
-                if mode != Mode::Polish && !delta.is_empty() {
+                if !matches!(mode, Mode::Polish | Mode::CustomReplace(_)) && !delta.is_empty() {
                     post(Update::Delta(delta.to_owned()));
                 }
                 Ok(())
             })
             .and_then(|output| {
                 ensure!(!worker_cancelled.load(Ordering::Acquire), "请求已取消");
-                let active = || !worker_cancelled.load(Ordering::Acquire);
+                let active = || !worker_cancelled.load(Ordering::Acquire) && (!matches!(mode, Mode::CustomReplace(_)) || range.is_some() && range == target.writable_range());
                 complete(
                     mode,
                     config.show_polish_notes,
@@ -187,6 +197,8 @@ pub(super) fn run(
 
     let kind = if mode == Mode::Jyutping {
         Kind::Yueping
+    } else if matches!(mode, Mode::CustomBubble(_) | Mode::CustomReplace(_)) {
+        Kind::Result
     } else {
         Kind::Translation
     };
@@ -194,7 +206,9 @@ pub(super) fn run(
         spinner::hide();
         card(anchor, Kind::Error, &error.to_string(), None, 0);
     }
+    let mut pending = true;
     message_loop(|message| match message {
+        WM_APP_OUTSIDE if pending && matches!(mode, Mode::CustomReplace(_)) => true,
         WM_APP_ESC | WM_APP_OUTSIDE => false,
         WM_APP_UPDATE => {
             let mut delta = String::new();
@@ -214,6 +228,7 @@ pub(super) fn run(
                 popup::append(&delta);
             }
             if let Some(result) = completion {
+                pending = false;
                 spinner::hide();
                 match result {
                     Ok(Completion::Silent) => return false,
@@ -284,6 +299,17 @@ fn message_loop(mut thread_message: impl FnMut(u32) -> bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_replace_preserves_literal_output_and_falls_back_to_a_card() {
+        let output = "正文\n<notes>\n代码";
+        let result = complete(Mode::CustomReplace(0), true, "原文", output, |body| {
+            assert_eq!(body, output);
+            false
+        }).unwrap();
+        assert!(matches!(result, Completion::Card(Kind::Result, text, _) if text == output));
+        assert!(matches!(complete(Mode::CustomReplace(0), false, "原文", output, |_| true).unwrap(), Completion::Silent));
+    }
 
     #[test]
     fn polish_pastes_only_corrected_text_with_either_notes_setting() {

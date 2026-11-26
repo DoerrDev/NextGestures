@@ -23,14 +23,23 @@ enum Mode {
     Polish,
     Translate,
     Jyutping,
+    CustomBubble(usize),
+    CustomReplace(usize),
 }
 
 impl Mode {
-    fn for_action(action: &Action) -> Result<Self> {
+    fn for_action(action: &Action, ai: &AiSettings) -> Result<Self> {
         match action {
             Action::AiPolish => Ok(Self::Polish),
             Action::AiTranslate => Ok(Self::Translate),
             Action::AiJyutping => Ok(Self::Jyutping),
+            Action::AiCustom { id } => {
+                let (index, action) = ai.actions.iter().enumerate().find(|(_, a)| a.id == *id).context("AI 动作已删除")?;
+                Ok(match action.mode {
+                    gesture_core::ResultMode::Bubble => Self::CustomBubble(index),
+                    gesture_core::ResultMode::Replace => Self::CustomReplace(index),
+                })
+            }
             _ => bail!("动作类型错误"),
         }
     }
@@ -50,6 +59,7 @@ impl Mode {
                         .into()
                 }
             }
+            Self::CustomBubble(_) | Self::CustomReplace(_) => unreachable!("custom actions use a user template"),
             Self::Translate => include_str!("quickformater/translate.txt").into(),
             Self::Jyutping => include_str!("quickformater/yueping.txt").into(),
         }
@@ -99,13 +109,22 @@ fn request(
         client = client.no_proxy();
     }
     let client = client.build()?;
+    let messages = match mode {
+        Mode::CustomBubble(i) | Mode::CustomReplace(i) => {
+            let template = &config.actions[i].prompt;
+            let count = template.matches("{{selection}}").count();
+            ensure!(count > 0 && template.len().saturating_add(source.len().saturating_mul(count)) <= 2 * 1024 * 1024, "请检查 Prompt 占位符或缩短选文");
+            json!([{"role":"user", "content":template.replace("{{selection}}", source)}])
+        }
+        _ => json!([
+            {"role": "system", "content": mode.prompt(config.show_polish_notes).trim()},
+            {"role": "user", "content": format!("<text>\n{source}\n</text>")},
+        ]),
+    };
     let body = json!({
         "model": config.model.trim(),
         "stream": true,
-        "messages": [
-            {"role": "system", "content": mode.prompt(config.show_polish_notes).trim()},
-            {"role": "user", "content": format!("<text>\n{source}\n</text>")},
-        ],
+        "messages": messages,
     });
     let key = config.api_key.trim();
     let mut req = client
@@ -142,6 +161,7 @@ fn parse_response(
     mut on_delta: impl FnMut(&str) -> Result<()>,
 ) -> Result<String> {
     let (mut raw, mut text, mut sse) = (String::new(), String::new(), false);
+    let mut finished = false;
     let mut received = 0;
     for line in reader.lines() {
         let line = line.context("读取 AI 响应失败")?;
@@ -151,6 +171,7 @@ fn parse_response(
             sse = true;
             let data = data.trim();
             if data == "[DONE]" {
+                finished = true;
                 break;
             }
             if data.is_empty() {
@@ -159,6 +180,10 @@ fn parse_response(
             let chunk: Value =
                 serde_json::from_str(data).map_err(|_| anyhow::anyhow!("AI 流式响应格式错误"))?;
             ensure!(chunk.get("error").is_none(), "AI 服务返回错误");
+            if let Some(reason) = chunk.pointer("/choices/0/finish_reason").and_then(Value::as_str) {
+                ensure!(reason == "stop", "AI 回复未完整生成");
+                finished = true;
+            }
             if let Some(delta) = chunk
                 .pointer("/choices/0/delta/content")
                 .and_then(Value::as_str)
@@ -177,10 +202,12 @@ fn parse_response(
             raw.push('\n');
         }
     }
+    ensure!(!sse || finished, "AI 流式响应提前中断");
     if !sse {
         let response: Value =
             serde_json::from_str(&raw).map_err(|_| anyhow::anyhow!("AI 响应格式错误"))?;
         ensure!(response.get("error").is_none(), "AI 服务返回错误");
+        ensure!(response.pointer("/choices/0/finish_reason").and_then(Value::as_str).is_none_or(|reason| reason == "stop"), "AI 回复未完整生成");
         text = response
             .pointer("/choices/0/message/content")
             .and_then(Value::as_str)
@@ -250,7 +277,7 @@ impl Drop for InProgress {
 }
 
 pub fn spawn(app: &AppHandle, action: &Action, ai: &AiSettings) -> Result<()> {
-    let mode = Mode::for_action(action)?;
+    let mode = Mode::for_action(action, ai)?;
     #[cfg(windows)]
     {
         let target = selection::Target::current().context("没有可获取选中文本的前台窗口")?;
@@ -340,6 +367,7 @@ mod tests {
         use std::net::TcpListener;
 
         for (action, prompt_fragment, answer) in [
+            (Action::AiCustom { id: "fixture".into() }, "前選中文字后", "OK"),
             (Action::AiPolish, "English writing tutor", "Hello."),
             (Action::AiTranslate, "professional translator", "你好。"),
             (
@@ -351,6 +379,7 @@ mod tests {
             let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
             let config = AiSettings {
                 base_url: format!("http://{}/v1", listener.local_addr().unwrap()),
+                actions: vec![gesture_core::AiAction { id: "fixture".into(), name: "测试".into(), prompt: "前{{selection}}后".into(), mode: gesture_core::ResultMode::Bubble, icon: String::new() }],
                 model: "fixture-model".into(),
                 api_key: "fixture-key".into(),
                 ..Default::default()
@@ -392,11 +421,15 @@ mod tests {
                         .unwrap()
                         .contains(prompt_fragment)
                 );
-                assert_eq!(body["messages"][1]["content"], "<text>\n選中文字\n</text>");
+                if answer == "OK" {
+                    assert_eq!(body["messages"], json!([{"role":"user","content":"前選中文字后"}]));
+                } else {
+                    assert_eq!(body["messages"][1]["content"], "<text>\n選中文字\n</text>");
+                }
                 let body = json!({"choices": [{"message": {"content": answer}}]}).to_string();
                 write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             });
-            let mode = Mode::for_action(&action).unwrap();
+            let mode = Mode::for_action(&action, &config).unwrap();
             let result = request(
                 &config,
                 endpoint(&config.base_url).unwrap(),
