@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
@@ -10,6 +10,8 @@ use gesture_platform::{hook, hotkey};
 pub struct AppState {
     pub path: PathBuf,
     pub config: RwLock<Config>,
+    /// 手势配置换版时递增，读取方持有 config 的读锁。
+    config_revision: AtomicU64,
     /// 上次由本进程写入时的 mtime，用来区分外部编辑
     mtime: RwLock<Option<SystemTime>>,
     pub recording: AtomicBool,
@@ -23,11 +25,16 @@ impl AppState {
             mtime: RwLock::new(mtime_of(&path)),
             path,
             config: RwLock::new(config),
+            config_revision: AtomicU64::new(0),
             recording: AtomicBool::new(false),
             shortcuts_paused: AtomicBool::new(false),
         };
         state.push_to_hook();
         Ok(state)
+    }
+
+    pub fn config_revision(&self) -> u64 {
+        self.config_revision.load(Relaxed)
     }
 
     pub fn save(&self) -> Result<()> {
@@ -51,6 +58,7 @@ impl AppState {
         let fresh = Config::load(&self.path)?;
         self.sync_shortcuts(&fresh, false)?;
         *config = fresh;
+        self.config_revision.fetch_add(1, Relaxed);
         *self.mtime.write().unwrap() = mtime_of(&self.path);
         drop(config);
         self.push_to_hook();
@@ -120,6 +128,7 @@ impl AppState {
         }
         *self.mtime.write().unwrap() = mtime_of(&self.path);
         *config = next;
+        self.config_revision.fetch_add(1, Relaxed);
         drop(config);
         self.push_to_hook();
         Ok(())

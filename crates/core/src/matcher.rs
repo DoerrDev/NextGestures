@@ -79,6 +79,30 @@ pub fn requires_release(cfg: &Config, exe: &str, button: Option<TriggerButton>) 
     })
 }
 
+/// 只检查是否有适用的轨迹模板，供绘制中决定是否需要实时匹配。
+pub fn has_stroke_candidate(
+    cfg: &Config,
+    exe: &str,
+    input: Input<'_>,
+    accepts: impl Fn(&Gesture) -> bool,
+) -> bool {
+    !cfg.is_passthrough(exe) && cfg.profiles.iter().any(|p| {
+        (p.is_global() || matches_exe(p, exe)) && p.gestures.iter().any(|g| {
+            matches_input(g, input) && !g.points.is_empty() && accepts(g)
+        })
+    })
+}
+
+fn matches_input(g: &Gesture, input: Input<'_>) -> bool {
+    g.enabled
+        && g.has_mouse_trigger()
+        && g.trigger == input.button
+        && g.wheel == input.wheel
+        && g.left_click == input.left_click
+        && g.is_dwell() == input.dwell
+        && (g.region.is_none() || g.region == input.region)
+}
+
 /// 指定了边角的手势优先于不限边角的同轨迹手势
 fn best_of<'a, I: Iterator<Item = &'a Profile>>(
     profiles: I,
@@ -88,12 +112,7 @@ fn best_of<'a, I: Iterator<Item = &'a Profile>>(
     let mut best: Option<(bool, Matched<'a>)> = None;
     for p in profiles {
         for g in &p.gestures {
-            // 只有快捷键的手势不参与鼠标匹配
-            if !g.enabled || !g.has_mouse_trigger() || g.trigger != input.button || g.wheel != input.wheel
-                || g.left_click != input.left_click || g.is_dwell() != input.dwell {
-                continue;
-            }
-            if g.region.is_some() && g.region != input.region {
+            if !matches_input(g, input) {
                 continue;
             }
             let s = match input.stroke {

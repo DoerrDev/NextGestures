@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError};
-use gesture_core::{Action, FireMode, Point, Region, TriggerButton, WheelDir, matcher, recognizer};
+use gesture_core::{Action, Config, FireMode, Gesture, Point, Region, TriggerButton, WheelDir, matcher, recognizer};
 use gesture_platform::hook::{self, HookEvent};
 use gesture_platform::{input, window};
 use serde::Serialize;
@@ -95,6 +95,7 @@ struct Session {
     left_click: bool,
     exe: String,
     raw: Vec<(i32, i32)>,
+    live: LiveMatch,
     fired: bool,
     shown_name: Option<String>,
     /// 关闭轨迹显示时不往 overlay 推点
@@ -105,6 +106,45 @@ struct Session {
 /// 鼠标回报率可达 1000Hz，每个点单独 emit 就是一次 WebView2 ExecuteScript；
 /// overlay 每帧才重画一次，按 ~250Hz 批量推送观感不变
 const TRAIL_FLUSH: Duration = Duration::from_millis(4);
+const MATCH_HINT_INTERVAL: Duration = Duration::from_millis(25);
+
+#[derive(Default)]
+struct LiveMatch {
+    // Config revision and whether the current input can trigger immediately.
+    immediate: Option<(u64, bool)>,
+    last_move_check: Option<Instant>,
+    stroke: recognizer::LiveStroke,
+    processed: usize,
+}
+
+impl LiveMatch {
+    fn check_move(&mut self, now: Instant, immediate: bool, show_hint: bool) -> bool {
+        if immediate
+            || (show_hint
+                && self.last_move_check.is_none_or(|last| now - last >= MATCH_HINT_INTERVAL))
+        {
+            self.last_move_check = Some(now);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn normalize(&mut self, raw: &[(i32, i32)]) -> Option<Option<Vec<Point>>> {
+        if raw.is_empty() {
+            return Some(None);
+        }
+        for &(x, y) in &raw[self.processed..] {
+            self.stroke.push([x as f32, y as f32]);
+        }
+        self.processed = raw.len();
+        self.stroke.normalize().map(Some)
+    }
+}
+
+fn move_checkpoint(count: usize) -> bool {
+    count >= 6 && count % 3 == 0
+}
 
 /// 鼠标停在配置了停留手势的边角，到点执行一次
 struct Hover {
@@ -220,6 +260,7 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
                     left_click: false,
                     exe: window::foreground_exe(),
                     raw: vec![point],
+                    live: LiveMatch::default(),
                     fired: false,
                     shown_name: None,
                     show_trail: begin_trail(&app),
@@ -234,11 +275,13 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
                     left_click: false,
                     exe: window::foreground_exe(),
                     raw: vec![],
+                    live: LiveMatch::default(),
                     fired: false,
                     shown_name: None,
                     show_trail: false, // 纯滚轮手势没有轨迹
                 });
                 s.wheel.push(dir);
+                s.live.immediate = None;
                 emit_live(&app, s);
                 if !recording(&app) && !s.fired {
                     on_wheel_partial(&app, s);
@@ -253,13 +296,14 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
                 if recording(&app) {
                     // 只有设置窗口的录制面板关心，不必广播给 overlay
                     let _ = app.emit_to("main", "gesture:live-point", [point.0, point.1]);
-                } else if !s.fired && s.raw.len() >= 6 && s.raw.len() % 3 == 0 {
-                    on_partial(&app, s);
+                } else if !s.fired && move_checkpoint(s.raw.len()) {
+                    on_partial(&app, s, true);
                 }
             }
             HookEvent::LeftClick { point } => {
                 let Some(s) = session.as_mut() else { continue };
                 s.left_click = true;
+                s.live.immediate = None;
                 s.raw.push(point);
                 if s.show_trail {
                     trail.push(&app, point);
@@ -267,7 +311,7 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
                 }
                 emit_live(&app, s);
                 if !recording(&app) && !s.fired {
-                    on_partial(&app, s);
+                    on_partial(&app, s, false);
                 }
             }
             HookEvent::End { button, region, points, times, wheel, left_click } => {
@@ -303,6 +347,17 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
                 let _ = app.emit_to(overlay::LABEL, "trail:end", ());
                 if s.is_none_or(|s| s.button.is_some()) {
                     stop_recording(&app);
+                }
+            }
+            HookEvent::StrokeLimit => {
+                const MESSAGE: &str = "你也太无聊了";
+                session = None;
+                let _ = app.emit_to(overlay::LABEL, "trail:end", ());
+                if recording(&app) {
+                    stop_recording(&app);
+                    let _ = app.emit("gesture:record-failed", MESSAGE);
+                } else {
+                    toast(&app, MESSAGE);
                 }
             }
         }
@@ -407,12 +462,33 @@ fn finish_recording(
 }
 
 /// 画的过程中实时提示命中的手势名；Immediate 模式直接执行
-fn on_partial(app: &AppHandle, s: &mut Session) {
-    let hit = lookup(app, &s.exe, s.button, s.region, &s.wheel, s.left_click, &s.raw);
+fn on_partial(app: &AppHandle, s: &mut Session, movement: bool) {
+    let state = app.state::<AppState>();
+    let cfg = state.config.read().unwrap();
+    let show_hint = !cfg.settings.quiet_mode;
+    let input = to_input(s.button, s.region, &s.wheel, s.left_click, None);
+    if movement {
+        let revision = state.config_revision();
+        let immediate = match s.live.immediate {
+            Some((cached, value)) if cached == revision => value,
+            _ => {
+                let value = has_immediate_stroke(&cfg, &s.exe, input);
+                s.live.immediate = Some((revision, value));
+                value
+            }
+        };
+        if !s.live.check_move(Instant::now(), immediate, show_hint) {
+            return;
+        }
+    }
+    let hit = s.live.normalize(&s.raw).and_then(|norm| {
+        lookup_input(&cfg, &s.exe, matcher::Input { stroke: norm.as_deref(), ..input })
+    });
+    drop(cfg);
     let name = hit.as_ref().map(|h| h.name.clone());
     if name != s.shown_name {
         s.shown_name = name.clone();
-        if show_match_hint(app) {
+        if show_hint {
             let _ = app.emit_to(overlay::LABEL, "trail:match", name);
         }
     }
@@ -427,7 +503,12 @@ fn on_partial(app: &AppHandle, s: &mut Session) {
 
 /// 滚轮手势的 Immediate 模式：攒到一格就立刻执行，不等滚轮停
 fn on_wheel_partial(app: &AppHandle, s: &mut Session) {
-    let Some(hit) = lookup(app, &s.exe, s.button, s.region, &s.wheel, s.left_click, &s.raw) else {
+    let Some(norm) = s.live.normalize(&s.raw) else { return };
+    let state = app.state::<AppState>();
+    let cfg = state.config.read().unwrap();
+    let hit = lookup_input(&cfg, &s.exe, to_input(s.button, s.region, &s.wheel, s.left_click, norm.as_deref()));
+    drop(cfg);
+    let Some(hit) = hit else {
         return;
     };
     if hit.fire_mode != FireMode::Immediate {
@@ -515,21 +596,35 @@ fn lookup(
     let norm = norm_of(raw)?;
     let state = app.state::<AppState>();
     let cfg = state.config.read().unwrap();
-    let m = matcher::best(&cfg, exe, to_input(button, region, wheel, left_click, norm.as_deref()))?;
+    lookup_input(&cfg, exe, to_input(button, region, wheel, left_click, norm.as_deref()))
+}
+
+fn must_release(cfg: &Config, exe: &str, input: matcher::Input<'_>) -> bool {
+    // 右键组合存在时保留追加左键的机会，统一在右键松开时执行。
+    input.left_click || matcher::requires_release(cfg, exe, input.button)
+}
+
+fn allows_immediate(gesture: &Gesture) -> bool {
+    gesture.fire_mode == FireMode::Immediate
+        && !gesture.action.is_ai()
+        && !matches!(gesture.action, Action::Screenshot | Action::Pin | Action::RecordRegion)
+}
+
+fn has_immediate_stroke(cfg: &Config, exe: &str, input: matcher::Input<'_>) -> bool {
+    !must_release(cfg, exe, input) && matcher::has_stroke_candidate(cfg, exe, input, allows_immediate)
+}
+
+fn lookup_input(cfg: &Config, exe: &str, input: matcher::Input<'_>) -> Option<Hit> {
+    let m = matcher::best(cfg, exe, input)?;
     Some(Hit {
         profile_id: m.profile_id.to_string(),
         gesture_id: m.gesture.id.clone(),
         name: m.gesture.name.clone(),
         score: m.score,
-        // 右键组合存在时保留追加左键的机会，统一在右键松开时执行。
-        fire_mode: if m.gesture.action.is_ai()
-            || matches!(m.gesture.action, Action::Screenshot | Action::Pin | Action::RecordRegion)
-            || left_click
-            || matcher::requires_release(&cfg, exe, button)
-        {
-            FireMode::OnRelease
+        fire_mode: if allows_immediate(m.gesture) && !must_release(cfg, exe, input) {
+            FireMode::Immediate
         } else {
-            m.gesture.fire_mode
+            FireMode::OnRelease
         },
         action: m.gesture.action.clone(),
     })
@@ -635,4 +730,121 @@ pub fn start(app: &AppHandle) {
     hook::start(tx);
     spawn(app.clone(), rx);
     spawn_config_watcher(app.clone());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gesture_core::Profile;
+
+    fn gesture(id: &str, mode: FireMode, stroke: &[Point]) -> Gesture {
+        Gesture {
+            id: id.into(),
+            name: id.into(),
+            enabled: true,
+            deletable: true,
+            trigger: Some(TriggerButton::Right),
+            region: None,
+            wheel: vec![],
+            left_click: false,
+            dwell_ms: 0,
+            fire_mode: mode,
+            points: stroke.to_vec(),
+            times: vec![],
+            action: Action::None,
+            hotkey: vec![],
+        }
+    }
+
+    fn profile(exe: &str, gestures: Vec<Gesture>) -> Profile {
+        Profile {
+            id: exe.into(),
+            name: exe.into(),
+            exe: exe.into(),
+            gestures,
+            passthrough: false,
+        }
+    }
+
+    #[test]
+    fn movement_limits_hints_and_preserves_every_immediate_checkpoint() {
+        let start = Instant::now();
+        let mut invisible = LiveMatch::default();
+        let mut hint = LiveMatch::default();
+        let mut immediate = LiveMatch::default();
+        let mut hints = vec![];
+        let mut checks = vec![];
+        for count in (1..=90).filter(|&n| move_checkpoint(n)) {
+            let now = start + Duration::from_millis(count as u64);
+            assert!(!invisible.check_move(now, false, false));
+            if hint.check_move(now, false, true) {
+                hints.push(count);
+            }
+            if immediate.check_move(now, true, false) {
+                checks.push(count);
+            }
+        }
+        assert_eq!(checks, (6..=90).step_by(3).collect::<Vec<_>>());
+        assert_eq!(hints, [6, 33, 60, 87]);
+        assert!(hint.check_move(start + Duration::from_millis(90), true, true));
+    }
+
+    #[test]
+    fn cached_stroke_preserves_first_immediate_hit_and_full_release_winner() {
+        let mut raw: Vec<(i32, i32)> = (0..130).map(|x| (x * 5, 0)).collect();
+        raw.extend((1..180).map(|y| (645, y * 5)));
+        let short = norm_of(&raw[..30]).unwrap().unwrap();
+        let long = norm_of(&raw).unwrap().unwrap();
+        let global = gesture("short", FireMode::Immediate, &short);
+        let release = gesture("long", FireMode::OnRelease, &long);
+        let cfg = Config { profiles: vec![profile("", vec![global, release])], ..Config::default() };
+        let mut live = LiveMatch::default();
+        let mut first = None;
+        for count in (1..=raw.len()).filter(|&n| move_checkpoint(n)) {
+            let legacy = norm_of(&raw[..count]).flatten().unwrap();
+            let current = live.normalize(&raw[..count]).flatten().unwrap();
+            let hit_for = |stroke: &[Point]| {
+                let input = to_input(Some(TriggerButton::Right), None, &[], false, Some(stroke));
+                lookup_input(&cfg, "x.exe", input).map(|hit| (hit.gesture_id, hit.fire_mode))
+            };
+            let current = hit_for(&current);
+            assert_eq!(current, hit_for(&legacy), "prefix {count}");
+            if first.is_none() && current.is_some_and(|(_, mode)| mode == FireMode::Immediate) {
+                first = Some(count);
+            }
+        }
+        assert_eq!(first, Some(6));
+        let input = to_input(Some(TriggerButton::Right), None, &[], false, Some(&long));
+        assert_eq!(lookup_input(&cfg, "x.exe", input).unwrap().gesture_id, "long");
+    }
+
+    #[test]
+    fn immediate_gate_keeps_release_winners_and_respects_combinations() {
+        let stroke = recognizer::normalize(&[[0.0, 0.0], [90.0, 0.0]]).unwrap();
+        let global = gesture("global", FireMode::Immediate, &stroke);
+        let app = gesture("app", FireMode::OnRelease, &stroke);
+        let mut cfg = Config {
+            profiles: vec![profile("", vec![global]), profile("foo.exe", vec![app])],
+            ..Config::default()
+        };
+        let input = to_input(Some(TriggerButton::Right), None, &[], false, Some(&stroke));
+        assert!(has_immediate_stroke(&cfg, "FOO.EXE", input));
+        let hit = lookup_input(&cfg, "FOO.EXE", input).unwrap();
+        assert_eq!((hit.gesture_id.as_str(), hit.fire_mode), ("app", FireMode::OnRelease));
+
+        cfg.profiles[1].gestures[0].left_click = true;
+        assert!(!has_immediate_stroke(&cfg, "foo.exe", input));
+        let hit = lookup_input(&cfg, "foo.exe", input).unwrap();
+        assert_eq!((hit.gesture_id.as_str(), hit.fire_mode), ("global", FireMode::OnRelease));
+        assert_eq!(lookup_input(&cfg, "bar.exe", input).unwrap().fire_mode, FireMode::Immediate);
+
+        cfg.profiles[0].gestures[0].wheel = vec![WheelDir::Up];
+        assert!(!has_immediate_stroke(&cfg, "bar.exe", input));
+        let wheel = to_input(Some(TriggerButton::Right), None, &[WheelDir::Up], false, Some(&stroke));
+        assert!(has_immediate_stroke(&cfg, "bar.exe", wheel));
+
+        cfg.profiles[0].gestures[0].action = Action::Screenshot;
+        assert!(!has_immediate_stroke(&cfg, "bar.exe", wheel));
+        assert_eq!(lookup_input(&cfg, "bar.exe", wheel).unwrap().fire_mode, FireMode::OnRelease);
+    }
 }

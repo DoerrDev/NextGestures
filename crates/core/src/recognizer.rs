@@ -9,10 +9,41 @@ const HALF_DIAGONAL: f32 = 176.776_7; // 0.5 * sqrt(2) * SQUARE_SIZE
 /// 故意不做 $1 的旋转归一化，否则 "↓" 和 "→" 会互相匹配。
 pub fn normalize(raw: &[Point]) -> Option<Vec<Point>> {
     let pts = dedup(raw);
-    if pts.len() < 2 || path_length(&pts) <= 1e-4 {
+    let total = path_length(&pts);
+    normalize_path(&pts, total, None)
+}
+
+/// 绘制中反复识别同一条逐渐变长的轨迹，追加时只计算新线段的长度。
+#[derive(Default)]
+pub struct LiveStroke {
+    points: Vec<Point>,
+    lengths: Vec<f32>,
+    total: f32,
+}
+
+impl LiveStroke {
+    pub fn push(&mut self, point: Point) {
+        if let Some(&last) = self.points.last() {
+            let length = dist(last, point);
+            if !(length > 1e-4) {
+                return;
+            }
+            self.lengths.push(length);
+            self.total += length;
+        }
+        self.points.push(point);
+    }
+
+    pub fn normalize(&self) -> Option<Vec<Point>> {
+        normalize_path(&self.points, self.total, Some(&self.lengths))
+    }
+}
+
+fn normalize_path(pts: &[Point], total: f32, lengths: Option<&[f32]>) -> Option<Vec<Point>> {
+    if pts.len() < 2 || total <= 1e-4 {
         return None;
     }
-    let mut out = resample(&pts, NUM_POINTS);
+    let mut out = resample(pts, NUM_POINTS, total, lengths);
     scale_uniform(&mut out);
     translate_to_origin(&mut out);
     for p in &mut out {
@@ -107,10 +138,11 @@ fn stretch_to_square(pts: &[Point]) -> Option<Vec<Point>> {
         .collect();
     // 拉伸改变了各段的相对长度，必须按新弧长重采样，否则两条轨迹的点对不上
     let de = dedup(&stretched);
-    if de.len() < 2 || path_length(&de) <= 1e-4 {
+    let total = path_length(&de);
+    if de.len() < 2 || total <= 1e-4 {
         return None;
     }
-    let mut out = resample(&de, NUM_POINTS);
+    let mut out = resample(&de, NUM_POINTS, total, None);
     translate_to_origin(&mut out);
     Some(out)
 }
@@ -143,25 +175,33 @@ fn path_length(pts: &[Point]) -> f32 {
     pts.windows(2).map(|w| dist(w[0], w[1])).sum()
 }
 
-fn resample(pts: &[Point], n: usize) -> Vec<Point> {
-    let interval = path_length(pts) / (n - 1) as f32;
-    let mut out = vec![pts[0]];
+fn resample(pts: &[Point], n: usize, total: f32, lengths: Option<&[f32]>) -> Vec<Point> {
+    let interval = total / (n - 1) as f32;
+    let mut out = Vec::with_capacity(n);
+    out.push(pts[0]);
     let mut prev = pts[0];
     let mut acc = 0.0f32;
     let mut i = 1;
+    let mut whole_segment = true;
     while i < pts.len() && out.len() < n {
         let cur = pts[i];
-        let seg = dist(prev, cur);
+        // 插值后 prev 在线段内部，按原有浮点运算计算剩余长度。
+        let seg = match lengths {
+            Some(lengths) if whole_segment => lengths[i - 1],
+            _ => dist(prev, cur),
+        };
         if acc + seg >= interval && seg > 0.0 {
             let t = ((interval - acc) / seg).clamp(0.0, 1.0);
             let np = [prev[0] + t * (cur[0] - prev[0]), prev[1] + t * (cur[1] - prev[1])];
             out.push(np);
             prev = np;
             acc = 0.0;
+            whole_segment = false;
         } else {
             acc += seg;
             prev = cur;
             i += 1;
+            whole_segment = true;
         }
     }
     let last = *pts.last().unwrap();
@@ -319,5 +359,38 @@ mod tests {
     fn always_num_points() {
         let s = normalize(&line([0.0, 0.0], [3.0, 0.0], 2)).unwrap();
         assert_eq!(s.len(), NUM_POINTS);
+    }
+
+    #[test]
+    fn live_stroke_matches_batch_normalization_bit_for_bit_at_every_prefix() {
+        let mut rng = 2026_u32;
+        let mut x = -900;
+        let mut y = 550;
+        let irregular: Vec<Point> = (0..1200)
+            .map(|i| {
+                rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                if i % 7 != 0 {
+                    x += ((rng >> 16) % 101) as i32 - 43;
+                    y += ((rng >> 24) % 37) as i32 - 13;
+                }
+                [x as f32, y as f32]
+            })
+            .collect();
+        for raw in [
+            irregular,
+            line([-500.0, 240.0], [1900.0, 241.0], 200),
+            circle(-20.0, 80.0, 900.0, 300),
+            vec![[0.0, 0.0], [0.0, 0.0], [0.00001, 0.0], [20000.0, 20.0]],
+        ] {
+            let mut live = LiveStroke::default();
+            assert!(live.normalize().is_none());
+            for (i, &point) in raw.iter().enumerate() {
+                live.push(point);
+                let bits = |value: Option<Vec<Point>>| {
+                    value.map(|points| points.into_iter().map(|p| p.map(f32::to_bits)).collect::<Vec<_>>())
+                };
+                assert_eq!(bits(live.normalize()), bits(normalize(&raw[..=i])), "prefix {i}");
+            }
+        }
     }
 }

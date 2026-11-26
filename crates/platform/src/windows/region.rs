@@ -128,6 +128,17 @@ pub(super) struct Backdrop {
 }
 
 impl Backdrop {
+    #[cfg(test)]
+    pub(super) fn fixture(screen: RECT, bright: Vec<u32>) -> (Rc<Frozen>, Self) {
+        let previous_dpi = unsafe {
+            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+        };
+        (
+            Rc::new(Frozen { screen, bright, dim: Vec::new() }),
+            Self { hwnd: HWND::default(), _session: Session(previous_dpi) },
+        )
+    }
+
     /// 编辑窗口接管后整屏变暗，选区由编辑窗口自己显示。
     pub(super) fn attach(&self, owner: HWND) {
         SELECTION.with(|cell| {

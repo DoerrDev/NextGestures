@@ -34,6 +34,8 @@ const IDLE_MS: u64 = 400;
 const IDLE_TICK_MS: u64 = 50;
 /// 一格滚轮的 delta，硬件/驱动可能拆成多条小 delta 发出来
 const WHEEL_DELTA: i32 = 120;
+const MAX_STROKE_POINTS: usize = 8192;
+const MAX_STROKE_MS: u32 = 20_000;
 /// 唤醒钩子线程做空闲检查的自定义消息。不能用 WM_TIMER：它是最低优先级消息，
 /// 鼠标一动就会被钩子事件饿死，导致多次滚轮被并进同一个会话
 const WM_IDLE_TICK: u32 = WM_APP + 1;
@@ -55,6 +57,7 @@ pub enum HookEvent {
         left_click: bool,
     },
     Cancel,
+    StrokeLimit,
     /// 候选态直接松手，需要补发一次真实点击
     PassThroughClick { button: TriggerButton },
     /// 鼠标进出屏幕边角（配置了停留手势时才回报）
@@ -186,6 +189,8 @@ enum Phase {
 struct HookState {
     /// 黑名单窗口中开始的按键序列始终原样放行，直到对应按键松开。
     bypass_button: Option<TriggerButton>,
+    /// 超长手势取消后，继续吞掉尚未配对的触发键。
+    canceled_button: Option<TriggerButton>,
     phase: Phase,
     /// None 表示无按键的边角手势
     button: Option<TriggerButton>,
@@ -193,6 +198,7 @@ struct HookState {
     start: (i32, i32),
     /// 是否已经移动超过阈值（画了轨迹）
     moved: bool,
+    stroke_started: Option<u32>,
     points: Vec<(i32, i32)>,
     /// 与 points 一一对应的系统时间戳（ms）
     times: Vec<u32>,
@@ -213,11 +219,13 @@ thread_local! {
     static STATE: RefCell<HookState> = const {
         RefCell::new(HookState {
             bypass_button: None,
+            canceled_button: None,
             phase: Phase::Idle,
             button: None,
             region: None,
             start: (0, 0),
             moved: false,
+            stroke_started: None,
             points: Vec::new(),
             times: Vec::new(),
             wheel: Vec::new(),
@@ -248,7 +256,11 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 
 fn send(ev: HookEvent) {
     if let Some(tx) = TX.get() {
-        let _ = tx.try_send(ev);
+        // 给超长手势的取消消息保留一个位置，避免高频移动填满队列后留下一条旧轨迹。
+        let has_room = tx.capacity().is_none_or(|cap| tx.len() < cap.saturating_sub(1));
+        if matches!(ev, HookEvent::StrokeLimit) || has_room {
+            let _ = tx.try_send(ev);
+        }
     }
 }
 
@@ -257,6 +269,7 @@ fn reset(st: &mut HookState) {
     st.button = None;
     st.region = None;
     st.moved = false;
+    st.stroke_started = None;
     st.points.clear();
     st.times.clear();
     st.wheel.clear();
@@ -264,6 +277,15 @@ fn reset(st: &mut HookState) {
     st.last_wheel = None;
     st.left_click = false;
     TICKING.store(false, Relaxed);
+}
+
+fn cancel_long_stroke(st: &mut HookState, trigger_released: bool) {
+    let button = st.button;
+    reset(st);
+    if !trigger_released {
+        st.canceled_button = button;
+    }
+    send(HookEvent::StrokeLimit);
 }
 
 fn begin(st: &mut HookState, button: Option<TriggerButton>, region: Option<Region>, pt: (i32, i32), time: u32) {
@@ -332,6 +354,25 @@ fn handle_with_blacklist(
     if msg == WM_LBUTTONUP && st.swallowed_left_down {
         st.swallowed_left_down = false;
         return true;
+    }
+
+    let button_event = button_of(msg, ms);
+    if let Some(button) = st.canceled_button {
+        if let Some((current, down)) = button_event
+            && current == button
+        {
+            if !down {
+                st.canceled_button = None;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    if st.stroke_started.is_some_and(|start| ms.time.wrapping_sub(start) >= MAX_STROKE_MS) {
+        let trigger_released = button_event.is_some_and(|(button, down)| !down && Some(button) == st.button);
+        cancel_long_stroke(st, trigger_released);
+        return trigger_released;
     }
 
     if super::region::is_selecting() {
@@ -413,11 +454,7 @@ fn handle_with_blacklist(
         if st.phase == Phase::Idle || st.button.is_none() || st.left_click {
             return false;
         }
-        st.points.push(pt);
-        st.times.push(ms.time);
-        if st.moved {
-            send(HookEvent::Move { point: pt });
-        } else {
+        if !st.moved {
             let (dx, dy) = (pt.0 - st.start.0, pt.1 - st.start.1);
             let th = MOVE_THRESHOLD.load(Relaxed);
             if dx * dx + dy * dy >= th * th {
@@ -430,12 +467,28 @@ fn handle_with_blacklist(
                     send(HookEvent::PassThroughPress { button });
                     return false;
                 }
-                st.moved = true;
-                st.phase = Phase::Gesture;
-                send(HookEvent::Start { button: st.button, region: st.region, point: st.start });
-                send(HookEvent::Move { point: pt });
+            } else {
+                // 还在等待决定是否为点击，保持采样上限，松手仍按普通点击处理。
+                if st.points.len() < MAX_STROKE_POINTS {
+                    st.points.push(pt);
+                    st.times.push(ms.time);
+                }
+                return false;
             }
         }
+        if st.points.len() >= MAX_STROKE_POINTS {
+            cancel_long_stroke(st, false);
+            return false;
+        }
+        st.points.push(pt);
+        st.times.push(ms.time);
+        if !st.moved {
+            st.moved = true;
+            st.stroke_started = Some(ms.time);
+            st.phase = Phase::Gesture;
+            send(HookEvent::Start { button: st.button, region: st.region, point: st.start });
+        }
+        send(HookEvent::Move { point: pt });
         return false;
     }
 
@@ -457,6 +510,10 @@ fn handle_with_blacklist(
         if matches!(msg, WM_LBUTTONDOWN | WM_LBUTTONDBLCLK) {
             st.swallowed_left_down = true;
             if st.button == Some(TriggerButton::Right) && st.moved && !st.left_click {
+                if st.points.len() >= MAX_STROKE_POINTS {
+                    cancel_long_stroke(st, false);
+                    return true;
+                }
                 st.points.push(pt);
                 st.times.push(ms.time);
                 st.left_click = true;
@@ -466,7 +523,7 @@ fn handle_with_blacklist(
         return true;
     }
 
-    let Some((btn, down)) = button_of(msg, ms) else {
+    let Some((btn, down)) = button_event else {
         return false;
     };
 
@@ -533,8 +590,9 @@ mod tests {
     fn state(button: TriggerButton) -> HookState {
         let mut st = HookState {
             bypass_button: None,
+            canceled_button: None,
             phase: Phase::Idle, button: None, region: None, start: (0, 0),
-            moved: false, points: vec![], times: vec![], wheel: vec![], wheel_acc: 0,
+            moved: false, stroke_started: None, points: vec![], times: vec![], wheel: vec![], wheel_acc: 0,
             last_wheel: None, left_click: false, swallowed_left_down: false, hover: None,
         };
         begin(&mut st, Some(button), None, (0, 0), 0);
@@ -546,6 +604,63 @@ mod tests {
             pt: POINT { x, y: 0 }, time: x as u32,
             ..Default::default()
         })
+    }
+
+    #[test]
+    fn stroke_point_limit_cancels_and_consumes_the_original_button_release() {
+        let mut st = state(TriggerButton::Right);
+        for i in 1..MAX_STROKE_POINTS {
+            assert!(!event(&mut st, WM_MOUSEMOVE, 100 + i as i32));
+        }
+        assert_eq!(st.phase, Phase::Gesture);
+        assert_eq!(st.points.len(), MAX_STROKE_POINTS);
+        assert_eq!(st.times.len(), MAX_STROKE_POINTS);
+
+        // Endpoint-click sampling also obeys the limit and still consumes its paired release.
+        assert!(event(&mut st, WM_LBUTTONDOWN, 9000));
+        assert_eq!(st.phase, Phase::Idle);
+        assert!(st.points.is_empty() && st.times.is_empty());
+        assert_eq!(st.canceled_button, Some(TriggerButton::Right));
+        assert!(!event(&mut st, WM_MOUSEMOVE, 9001));
+        assert!(!event(&mut st, WM_MBUTTONDOWN, 9001));
+        assert!(!event(&mut st, WM_MBUTTONUP, 9001));
+        assert!(event(&mut st, WM_LBUTTONUP, 9001));
+        assert!(event(&mut st, WM_RBUTTONUP, 9001));
+        assert!(!event(&mut st, WM_RBUTTONUP, 9001));
+        assert!(st.canceled_button.is_none());
+    }
+
+    #[test]
+    fn stroke_timeout_on_trigger_release_uses_wrapping_mouse_timestamp() {
+        let mut st = state(TriggerButton::Right);
+        let start = u32::MAX - 100;
+        let msg = |time| MSLLHOOKSTRUCT { pt: POINT { x: 100, y: 0 }, time, ..Default::default() };
+        assert!(!handle(&mut st, WM_MOUSEMOVE, &msg(start)));
+        assert_eq!(st.stroke_started, Some(start));
+        assert!(!handle(&mut st, WM_MOUSEMOVE, &msg(start.wrapping_add(MAX_STROKE_MS - 1))));
+        assert_eq!(st.phase, Phase::Gesture);
+        assert!(handle(&mut st, WM_RBUTTONUP, &msg(start.wrapping_add(MAX_STROKE_MS))));
+        assert_eq!(st.phase, Phase::Idle);
+        assert!(st.points.is_empty() && st.times.is_empty());
+        assert!(st.canceled_button.is_none());
+        assert!(!handle(&mut st, WM_RBUTTONUP, &msg(start.wrapping_add(MAX_STROKE_MS))));
+    }
+
+    #[test]
+    fn elapsed_limit_starts_when_drawing_and_leaves_wheel_sequences_independent() {
+        let mut st = state(TriggerButton::Right);
+        assert!(!handle(&mut st, WM_MOUSEMOVE, &MSLLHOOKSTRUCT { time: MAX_STROKE_MS, ..Default::default() }));
+        assert_eq!(st.phase, Phase::Candidate);
+        assert!(event(&mut st, WM_RBUTTONUP, MAX_STROKE_MS as i32));
+        assert!(st.canceled_button.is_none());
+
+        begin(&mut st, None, Some(Region::Top), (0, 0), 0);
+        let wheel = MSLLHOOKSTRUCT { mouseData: 120 << 16, time: MAX_STROKE_MS * 2, ..Default::default() };
+        assert!(handle(&mut st, WM_MOUSEWHEEL, &wheel));
+        assert_eq!(st.phase, Phase::Gesture);
+        assert!(st.stroke_started.is_none());
+        assert_eq!(st.wheel, [WheelDir::Up]);
+        reset(&mut st);
     }
 
     #[test]

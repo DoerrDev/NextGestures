@@ -84,15 +84,12 @@ impl Annotate {
     pub(super) fn marked(&self) -> bool {
         !self.shapes.is_empty() || self.draft.is_some() || self.edit.is_some()
     }
-    /// 已提交的形状，用于关闭后压入历史栈。
-    pub(super) fn shapes(&self) -> Vec<Shape> {
-        self.shapes.iter().map(|shape| Shape::clone(shape)).collect()
-    }
-    /// 恢复历史贴图的形状；`Picture::pixels` 需由调用方一并恢复。
-    pub(super) fn set_shapes(&mut self, shapes: Vec<Shape>) {
-        self.shapes = shapes.into_iter().map(Rc::new).collect();
-        self.history.clear();
-        self.last = None;
+    /// 关闭时转移原图和已提交的形状，释放撤销与当前编辑持有的引用。
+    pub(super) fn into_closed(self) -> (Vec<u8>, Vec<Shape>) {
+        let Self { base, shapes, history, edit, .. } = self;
+        drop(history);
+        drop(edit);
+        (base, shapes.into_iter().map(Rc::unwrap_or_clone).collect())
     }
     /// 当前工具的物理像素粗细（文字为字号）。
     fn width(&self, tool: Tool) -> f32 {
@@ -316,8 +313,19 @@ impl Picture {
             }
         }
     }
+    /// 在刚建立的原图副本上重放历史记录里的标注。
+    pub(super) fn restore_shapes(&mut self, shapes: Vec<Shape>) {
+        self.ink.shapes = shapes.into_iter().map(Rc::new).collect();
+        self.paint_shapes();
+    }
+
     /// 从原图重放全部形状。
     fn rebuild(&mut self) {
+        self.pixels.copy_from_slice(&self.ink.base);
+        self.paint_shapes();
+    }
+
+    fn paint_shapes(&mut self) {
         let Picture {
             pixels,
             width,
@@ -325,7 +333,6 @@ impl Picture {
             ink,
             ..
         } = self;
-        pixels.copy_from_slice(&ink.base);
         let mut canvas = Canvas {
             data: pixels.as_mut_slice(),
             stride: *width as usize * 4,
@@ -337,7 +344,7 @@ impl Picture {
             draw::draw(shape, &mut canvas, &ink.base);
         }
     }
-    fn commit(&mut self, shape: Shape) {
+    pub(super) fn commit(&mut self, shape: Shape) {
         let Picture {
             pixels,
             width,

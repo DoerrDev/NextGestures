@@ -5,15 +5,22 @@
 //!   退出 / 贴图 / 保存 / 复制分别对应 Esc / Ctrl+T / Ctrl+S / Ctrl+C。
 //! - 贴图：置顶的图片，可拖动、滚轮缩放；空格打开工具栏编辑，Esc 完成；
 //!   单按 Ctrl 折叠成缩略图；无工具栏时 Esc 关闭并压入历史栈，贴图键可依次恢复。
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, Write};
+use std::os::windows::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 use windows::Win32::Foundation::{
     COLORREF, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::Storage::FileSystem::FILE_FLAG_DELETE_ON_CLOSE;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetThreadDpiAwarenessContext,
 };
@@ -45,11 +52,13 @@ const MAX_IMAGE_PIXELS: i32 = 32 * 1024 * 1024;
 const MIN_SIDE: i32 = 16;
 const ZOOM_BADGE_TIMER: usize = 8;
 const FLASH_TIMER: usize = 9;
+const FIRST_CROP_TIMER: usize = 0x100;
+const CROP_PREVIEW_MS: u32 = 16;
 /// 历史栈已空时投递给每张贴图：半透明 500ms 作为提示。
 const FLASH: u32 = WM_APP + 45;
 const FLASH_MS: u32 = 500;
-/// 关闭贴图的历史栈最多保留的张数。
-const HISTORY: usize = 20;
+/// 关闭贴图的历史按关闭顺序保留最近的 20 张。
+const HISTORY_COUNT: usize = 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Bounds {
@@ -190,6 +199,10 @@ struct Picture {
 
 impl Picture {
     fn new(pixels: Vec<u8>, width: i32, height: i32) -> Result<Self> {
+        Self::with_shapes(pixels, width, height, Vec::new())
+    }
+
+    fn with_shapes(pixels: Vec<u8>, width: i32, height: i32, shapes: Vec<Shape>) -> Result<Self> {
         ensure!(
             width > 0 && height > 0 && pixels.len() == width as usize * height as usize * 4,
             "图片像素长度错误"
@@ -225,6 +238,7 @@ impl Picture {
             flash: false,
             handles: false,
         };
+        picture.restore_shapes(shapes);
         picture.surface = picture.compose(view)?;
         Ok(picture)
     }
@@ -447,10 +461,17 @@ struct Resize {
     rect: RECT,
 }
 
+enum CropEnd {
+    Discard,
+    Displayed,
+    Pending,
+    At(POINT),
+}
+
 /// 关闭后压入历史栈的贴图，可被贴图键原样恢复（标注仍可撤销重编辑）。
 struct Closed {
-    base: Vec<u8>,
-    pixels: Vec<u8>,
+    id: u64,
+    original: File,
     shapes: Vec<Shape>,
     width: i32,
     height: i32,
@@ -459,11 +480,136 @@ struct Closed {
     alpha: u8,
 }
 
+impl Closed {
+    fn from_picture(picture: Picture, image: RECT, id: u64, dir: &Path) -> Result<Self> {
+        // 折叠时窗口只显示中间一块，按展开后的尺寸换算回原位置。
+        let (full_width, full_height) = zoom_size(picture.width, picture.height, picture.zoom);
+        let (shown_width, shown_height) = picture.display_size();
+        let (width, height, zoom, alpha) =
+            (picture.width, picture.height, picture.zoom, picture.alpha);
+        let (base, shapes) = picture.ink.into_closed();
+        // 写入文件前释放已经合成的像素及 GDI 位图。
+        drop(picture.pixels);
+        drop(picture.surface);
+        drop(picture.zoom_surface);
+        let original = write_history_image(dir, id, &base)?;
+        Ok(Self {
+            id,
+            original,
+            shapes,
+            width,
+            height,
+            origin: POINT {
+                x: image.left - (full_width - shown_width) / 2,
+                y: image.top - (full_height - shown_height) / 2,
+            },
+            zoom,
+            alpha,
+        })
+    }
+
+    fn into_picture(mut self) -> Result<(Picture, POINT)> {
+        let length = self.width as usize * self.height as usize * 4;
+        let base = read_history_image(&mut self.original, self.id, length)
+            .context("贴图历史的原图无效，已移除该条记录")?;
+        drop(self.original);
+        let mut picture = Picture::with_shapes(base, self.width, self.height, self.shapes)?;
+        picture.alpha = self.alpha;
+        if (self.zoom - 1.0).abs() > f64::EPSILON {
+            picture.zoom = self.zoom;
+            picture.zoom_surface = scaled_surface(
+                &picture.surface,
+                zoom_size(self.width, self.height, self.zoom),
+                false,
+            )?;
+        }
+        Ok((picture, self.origin))
+    }
+}
+
+fn history_dir() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .filter(|path| !path.is_empty())
+        .map_or_else(std::env::temp_dir, PathBuf::from)
+        .join("NextGestures")
+        .join("pin-history")
+}
+
+fn history_path(dir: &Path, id: u64) -> PathBuf {
+    static SESSION: OnceLock<u128> = OnceLock::new();
+    let session = SESSION.get_or_init(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    });
+    dir.join(format!("{}-{session}-{id}.bgra", std::process::id()))
+}
+
+fn write_history_image(dir: &Path, id: u64, base: &[u8]) -> Result<File> {
+    fs::create_dir_all(dir)?;
+    // 只使用已有的独占句柄恢复。系统在句柄关闭时删除文件，进程退出也适用。
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_DELETE_ON_CLOSE.0)
+        .open(history_path(dir, id))?;
+    file.write_all(&id.to_le_bytes())?;
+    file.write_all(base)?;
+    Ok(file)
+}
+
+fn read_history_image(file: &mut File, id: u64, length: usize) -> Result<Vec<u8>> {
+    let mut marker = [0; size_of::<u64>()];
+    ensure!(
+        file.metadata()?.len() == (length + marker.len()) as u64,
+        "原图文件长度不符"
+    );
+    file.rewind()?;
+    file.read_exact(&mut marker)?;
+    ensure!(u64::from_le_bytes(marker) == id, "原图编号与标注不符");
+    let mut base = vec![0; length];
+    file.read_exact(&mut base)?;
+    Ok(base)
+}
+
+struct ClosedHistory {
+    entries: VecDeque<Closed>,
+}
+
+impl ClosedHistory {
+    const fn new() -> Self {
+        Self {
+            entries: VecDeque::new(),
+        }
+    }
+
+    fn push(&mut self, closed: Closed) {
+        // 不同贴图的写入可能乱序完成，按窗口关闭时分配的编号淘汰。
+        let index = self.entries.partition_point(|entry| entry.id < closed.id);
+        self.entries.insert(index, closed);
+        if self.entries.len() > HISTORY_COUNT {
+            self.entries.pop_front();
+        }
+    }
+
+    fn pop(&mut self) -> Option<Closed> {
+        self.entries.pop_back()
+    }
+}
+
 thread_local! {
     static PICTURE: RefCell<Option<Picture>> = const { RefCell::new(None) };
     static STAGE: RefCell<Option<Stage>> = const { RefCell::new(None) };
+    /// 销毁时保存位置，等消息循环退出后再移动图片数据。
+    static CLOSED_PIN: Cell<Option<(RECT, u64)>> = const { Cell::new(None) };
     static DRAG_OFFSET: Cell<Option<POINT>> = const { Cell::new(None) };
     static RESIZE: Cell<Option<Resize>> = const { Cell::new(None) };
+    static PENDING_CROP: Cell<Option<RECT>> = const { Cell::new(None) };
+    static CROP_TIMER: Cell<Option<usize>> = const { Cell::new(None) };
+    static NEXT_CROP_TIMER: Cell<usize> = const { Cell::new(FIRST_CROP_TIMER) };
     static ZOOM_BADGE: Cell<Option<(HWND, POINT)>> = const { Cell::new(None) };
     /// 按下 Ctrl 后尚未按其他键 / 鼠标，松开时视为单按。
     static CTRL_TAP: Cell<bool> = const { Cell::new(false) };
@@ -473,7 +619,8 @@ static COUNT: AtomicUsize = AtomicUsize::new(0);
 static STAGING: AtomicUsize = AtomicUsize::new(0);
 /// 上次贴出的剪贴板序号；剪贴板没变时贴图键改为恢复历史。
 static LAST_SEQUENCE: AtomicU32 = AtomicU32::new(0);
-static CLOSED: Mutex<Vec<Closed>> = Mutex::new(Vec::new());
+static NEXT_CLOSED_ID: AtomicU64 = AtomicU64::new(1);
+static CLOSED: Mutex<ClosedHistory> = Mutex::new(ClosedHistory::new());
 
 fn staging() -> bool {
     STAGE.with(|stage| stage.borrow().is_some())
@@ -566,7 +713,7 @@ fn render(hwnd: HWND, position: Option<POINT>) -> Result<()> {
 }
 
 fn toggle_fold(hwnd: HWND) -> Result<()> {
-    stop_drag(hwnd);
+    stop_drag(hwnd, CropEnd::Displayed)?;
     hide_zoom_badge(hwnd);
     let mut rect = RECT::default();
     unsafe {
@@ -921,6 +1068,12 @@ fn preview_crop(hwnd: HWND, rect: RECT) -> Result<()> {
         }
         Ok(())
     })?;
+    // 更新窗口可能同步派发消息，先登记已写入位图的选区。
+    STAGE.with(|stage| {
+        if let Some(stage) = stage.borrow_mut().as_mut() {
+            stage.preview = Some(rect);
+        }
+    });
     render(
         hwnd,
         Some(POINT {
@@ -928,13 +1081,40 @@ fn preview_crop(hwnd: HWND, rect: RECT) -> Result<()> {
             y: top - SHADOW,
         }),
     )?;
-    STAGE.with(|stage| {
-        if let Some(stage) = stage.borrow_mut().as_mut() {
-            stage.preview = Some(rect);
-        }
-    });
     // Layered-window updates can change bounds without a position notification.
     bar::position()
+}
+
+fn queue_crop_preview(hwnd: HWND, rect: RECT) -> Result<()> {
+    PENDING_CROP.set(Some(rect));
+    if CROP_TIMER.get().is_some() {
+        return Ok(());
+    }
+    // 每次启动使用不同编号，之前已排队的 WM_TIMER 不会误触发新拖动。
+    let id = NEXT_CROP_TIMER.get();
+    NEXT_CROP_TIMER.set(id.checked_add(1).unwrap_or(FIRST_CROP_TIMER));
+    let id = unsafe { SetTimer(Some(hwnd), id, CROP_PREVIEW_MS, None) };
+    if id == 0 {
+        PENDING_CROP.take();
+        return preview_crop(hwnd, rect);
+    }
+    CROP_TIMER.set(Some(id));
+    Ok(())
+}
+
+fn cancel_crop_timer(hwnd: HWND) {
+    if let Some(id) = CROP_TIMER.take() {
+        let _ = unsafe { KillTimer(Some(hwnd), id) };
+    }
+}
+
+fn flush_crop_preview(hwnd: HWND) -> Result<()> {
+    if let Some(rect) = PENDING_CROP.take() {
+        preview_crop(hwnd, rect)?;
+    } else {
+        cancel_crop_timer(hwnd);
+    }
+    Ok(())
 }
 
 fn finish_crop() {
@@ -975,9 +1155,7 @@ fn start_resize(hwnd: HWND, edge: u32, cursor: POINT) -> Result<()> {
     Ok(())
 }
 
-fn move_resize(hwnd: HWND, resize: Resize) -> Result<()> {
-    let mut cursor = POINT::default();
-    unsafe { GetCursorPos(&mut cursor)? };
+fn resized_crop(resize: Resize, cursor: POINT, screen: RECT) -> RECT {
     let (dx, dy) = (cursor.x - resize.origin.x, cursor.y - resize.origin.y);
     let mut rect = resize.rect;
     let edge = resize.edge;
@@ -994,13 +1172,11 @@ fn move_resize(hwnd: HWND, resize: Resize) -> Result<()> {
         rect.bottom = (rect.bottom + dy).max(rect.top + MIN_SIDE);
     }
     // 拖到屏幕外时固定对边，只截断被拖动的一边。
-    if let Some(screen) = STAGE.with(|s| s.borrow().as_ref().map(|s| s.frozen.screen)) {
-        rect.left = rect.left.max(screen.left);
-        rect.top = rect.top.max(screen.top);
-        rect.right = rect.right.min(screen.right);
-        rect.bottom = rect.bottom.min(screen.bottom);
-    }
-    preview_crop(hwnd, rect)
+    rect.left = rect.left.max(screen.left);
+    rect.top = rect.top.max(screen.top);
+    rect.right = rect.right.min(screen.right);
+    rect.bottom = rect.bottom.min(screen.bottom);
+    rect
 }
 
 fn start_drag(hwnd: HWND, cursor: POINT) -> Result<()> {
@@ -1018,42 +1194,80 @@ fn start_drag(hwnd: HWND, cursor: POINT) -> Result<()> {
     Ok(())
 }
 
-fn move_drag(hwnd: HWND, offset: POINT) -> Result<()> {
+fn crop_drag_rect(
+    hwnd: HWND,
+    cursor: POINT,
+    resize: Option<Resize>,
+    offset: Option<POINT>,
+) -> Result<Option<RECT>> {
+    let Some(screen) = STAGE.with(|s| s.borrow().as_ref().map(|s| s.frozen.screen)) else {
+        return Ok(None);
+    };
+    if let Some(resize) = resize {
+        return Ok(Some(resized_crop(resize, cursor, screen)));
+    }
+    if let Some(offset) = offset {
+        // 移动选区时保持宽高，重新裁剪冻结画面。
+        let image = image_rect(hwnd)?;
+        let left = cursor.x - offset.x + SHADOW;
+        let top = cursor.y - offset.y + SHADOW;
+        return Ok(Some(RECT {
+            left,
+            top,
+            right: left + image.right - image.left,
+            bottom: top + image.bottom - image.top,
+        }));
+    }
+    Ok(None)
+}
+
+fn stage_drag_active() -> bool {
+    staging() && (RESIZE.get().is_some() || DRAG_OFFSET.get().is_some())
+}
+
+fn move_drag(hwnd: HWND) -> Result<()> {
+    let resize = RESIZE.get();
+    let offset = DRAG_OFFSET.get();
     let mut cursor = POINT::default();
-    unsafe {
-        GetCursorPos(&mut cursor)?;
-        // 截图阶段移动的是选区：同尺寸重新裁剪冻结画面。
-        if staging() {
-            let image = image_rect(hwnd)?;
-            let left = cursor.x - offset.x + SHADOW;
-            let top = cursor.y - offset.y + SHADOW;
-            return preview_crop(
-                hwnd,
-                RECT {
-                    left,
-                    top,
-                    right: left + image.right - image.left,
-                    bottom: top + image.bottom - image.top,
-                },
-            );
-        }
+    unsafe { GetCursorPos(&mut cursor)? };
+    if let Some(rect) = crop_drag_rect(hwnd, cursor, resize, offset)? {
+        return queue_crop_preview(hwnd, rect);
+    }
+    if let Some(offset) = offset {
         // 直接使用桌面坐标，避免系统移动循环在松手时把窗口拉回工作区。
-        SetWindowPos(
-            hwnd,
-            None,
-            cursor.x - offset.x,
-            cursor.y - offset.y,
-            0,
-            0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-        )?;
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                None,
+                cursor.x - offset.x,
+                cursor.y - offset.y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )?;
+        }
     }
     Ok(())
 }
 
-fn stop_drag(hwnd: HWND) -> bool {
-    let dragging = DRAG_OFFSET.take().is_some() | RESIZE.take().is_some();
-    if dragging {
+fn stop_drag(hwnd: HWND, end: CropEnd) -> Result<bool> {
+    let offset = DRAG_OFFSET.take();
+    let resize = RESIZE.take();
+    let dragging = offset.is_some() || resize.is_some();
+    cancel_crop_timer(hwnd);
+    let pending = PENDING_CROP.take();
+    let result = (|| {
+        let rect = match end {
+            CropEnd::At(cursor) => crop_drag_rect(hwnd, cursor, resize, offset)?,
+            CropEnd::Pending => pending,
+            CropEnd::Discard | CropEnd::Displayed => None,
+        };
+        if let Some(rect) = rect {
+            preview_crop(hwnd, rect)?;
+        }
+        Ok(())
+    })();
+    if dragging && !matches!(end, CropEnd::Discard) {
         finish_crop();
     }
     unsafe {
@@ -1061,7 +1275,7 @@ fn stop_drag(hwnd: HWND) -> bool {
             let _ = ReleaseCapture();
         }
     }
-    dragging
+    result.map(|()| dragging)
 }
 
 /// 直接把桌面上的矩形截成贴图（不经框选）。应在独立工作线程调用。
@@ -1191,51 +1405,8 @@ fn near_cursor(width: i32, height: i32) -> POINT {
 
 /// 恢复历史栈里的贴图：原位置、缩放、透明度，标注仍可继续编辑。
 fn restore(closed: Closed) -> Result<()> {
-    let mut picture = Picture::new(closed.base, closed.width, closed.height)?;
-    picture.ink.set_shapes(closed.shapes);
-    picture.pixels = closed.pixels;
-    picture.alpha = closed.alpha;
-    picture.surface = picture.compose(picture.view)?;
-    if (closed.zoom - 1.0).abs() > f64::EPSILON {
-        picture.zoom = closed.zoom;
-        picture.zoom_surface = scaled_surface(
-            &picture.surface,
-            zoom_size(closed.width, closed.height, closed.zoom),
-            false,
-        )?;
-    }
-    run(picture, closed.origin, None)
-}
-
-/// 关闭的贴图压入历史栈（超过上限时丢弃最早的）。
-fn push_closed(hwnd: HWND) {
-    let Ok(image) = image_rect(hwnd) else { return };
-    let closed = PICTURE.with(|p| {
-        let p = p.borrow();
-        let p = p.as_ref()?;
-        // 折叠时窗口只显示中间一块，按展开后的尺寸换算回原位置。
-        let (full_width, full_height) = zoom_size(p.width, p.height, p.zoom);
-        let (shown_width, shown_height) = p.display_size();
-        Some(Closed {
-            base: p.ink.base.clone(),
-            pixels: p.pixels.clone(),
-            shapes: p.ink.shapes(),
-            width: p.width,
-            height: p.height,
-            origin: POINT {
-                x: image.left - (full_width - shown_width) / 2,
-                y: image.top - (full_height - shown_height) / 2,
-            },
-            zoom: p.zoom,
-            alpha: p.alpha,
-        })
-    });
-    if let (Some(closed), Ok(mut stack)) = (closed, CLOSED.lock()) {
-        stack.push(closed);
-        if stack.len() > HISTORY {
-            stack.remove(0);
-        }
-    }
+    let (picture, origin) = closed.into_picture()?;
+    run(picture, origin, None)
 }
 
 /// 让本进程所有贴图闪一下半透明；返回贴图数量。
@@ -1380,6 +1551,11 @@ fn run(picture: Picture, origin: POINT, stage: Option<Stage>) -> Result<()> {
                 if super::pin_toolbar::translate(&msg) {
                     continue;
                 }
+                // 窗口在拖动时会改变位置。使用消息记录的屏幕坐标提交松手点。
+                if msg.hwnd == hwnd && msg.message == WM_LBUTTONUP && stage_drag_active() {
+                    report_render_error(stop_drag(hwnd, CropEnd::At(msg.pt)).map(|_| ()));
+                    continue;
+                }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
@@ -1389,9 +1565,17 @@ fn run(picture: Picture, origin: POINT, stage: Option<Stage>) -> Result<()> {
     if STAGE.with(|s| s.borrow_mut().take()).is_some() {
         STAGING.store(0, Ordering::Release);
     }
-    PICTURE.with(|p| {
-        p.borrow_mut().take();
-    });
+    let picture = PICTURE.with(|p| p.borrow_mut().take());
+    if let (Some(picture), Some((image, id))) = (picture, CLOSED_PIN.take()) {
+        match Closed::from_picture(picture, image, id, &history_dir()) {
+            Ok(closed) => {
+                if let Ok(mut history) = CLOSED.lock() {
+                    history.push(closed);
+                }
+            }
+            Err(error) => log::warn!("保存贴图历史失败: {error:#}"),
+        }
+    }
     result
 }
 
@@ -1420,7 +1604,6 @@ fn ctrl_tapped(msg: &MSG) -> bool {
 /// 截图阶段 → 贴图：关闭暗色背景，换成贴图工具栏（默认收起），图片和标注保留。
 fn to_pinned(hwnd: HWND) -> Result<()> {
     ink::drop_tool(hwnd)?;
-    stop_drag(hwnd);
     if STAGE.with(|s| s.borrow_mut().take()).is_some() {
         STAGING.store(0, Ordering::Release);
     }
@@ -1553,10 +1736,14 @@ fn command(hwnd: HWND, id: u16) {
         return;
     }
     let stage = staging();
-    if stage {
-        stop_drag(hwnd);
-    }
     let result = (|| -> Result<()> {
+        if stage {
+            let end = match id {
+                bar::CLOSE | bar::ESCAPE => CropEnd::Discard,
+                _ => CropEnd::Pending,
+            };
+            stop_drag(hwnd, end)?;
+        }
         match id {
             bar::COPY => {
                 ink::settle(hwnd)?;
@@ -1698,10 +1885,8 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
                 LRESULT(0)
             }
             WM_MOUSEMOVE => {
-                let result = if let Some(resize) = RESIZE.get() {
-                    move_resize(hwnd, resize)
-                } else if let Some(offset) = DRAG_OFFSET.get() {
-                    move_drag(hwnd, offset)
+                let result = if RESIZE.get().is_some() || DRAG_OFFSET.get().is_some() {
+                    move_drag(hwnd)
                 } else {
                     ink::pointer_move(hwnd, point(lp), wp.0 & 0x0004 != 0)
                 };
@@ -1716,29 +1901,29 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
-                if staging() && (RESIZE.get().is_some() || DRAG_OFFSET.get().is_some()) {
-                    let result = if let Some(resize) = RESIZE.get() {
-                        move_resize(hwnd, resize)
-                    } else if let Some(offset) = DRAG_OFFSET.get() {
-                        move_drag(hwnd, offset)
+                let result = if stage_drag_active() {
+                    // SendMessage 等直接派发没有 MSG.pt，此时使用其客户区坐标。
+                    let mut cursor = point(lp);
+                    let end = if ClientToScreen(hwnd, &mut cursor).as_bool() {
+                        CropEnd::At(cursor)
                     } else {
-                        Ok(())
+                        CropEnd::Pending
                     };
-                    stop_drag(hwnd);
-                    report_render_error(result);
-                } else if !stop_drag(hwnd) {
-                    report_render_error(ink::pointer_up(hwnd));
-                }
+                    stop_drag(hwnd, end).map(|_| ())
+                } else {
+                    stop_drag(hwnd, CropEnd::Displayed).and_then(|dragging| {
+                        if dragging { Ok(()) } else { ink::pointer_up(hwnd) }
+                    })
+                };
+                report_render_error(result);
                 LRESULT(0)
             }
             WM_CAPTURECHANGED => {
-                DRAG_OFFSET.set(None);
-                RESIZE.set(None);
-                finish_crop();
+                report_render_error(stop_drag(hwnd, CropEnd::Displayed).map(|_| ()));
                 DefWindowProcW(hwnd, message, wp, lp)
             }
             WM_CANCELMODE => {
-                stop_drag(hwnd);
+                report_render_error(stop_drag(hwnd, CropEnd::Displayed).map(|_| ()));
                 DefWindowProcW(hwnd, message, wp, lp)
             }
             WM_SETCURSOR
@@ -1765,6 +1950,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
             }
             windows::Win32::UI::Controls::WM_MOUSELEAVE => {
                 report_render_error(ink::mouse_leave(hwnd));
+                LRESULT(0)
+            }
+            WM_TIMER if CROP_TIMER.get() == Some(wp.0) => {
+                report_render_error(flush_crop_preview(hwnd));
                 LRESULT(0)
             }
             WM_TIMER if wp.0 == ink::CARET_TIMER => {
@@ -1836,14 +2025,18 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
                 LRESULT(0)
             }
             WM_DESTROY => {
-                stop_drag(hwnd);
+                report_render_error(stop_drag(hwnd, CropEnd::Discard).map(|_| ()));
                 hide_zoom_badge(hwnd);
                 let _ = KillTimer(Some(hwnd), FLASH_TIMER);
                 // 截图阶段退出时关闭暗色背景；贴图关闭后压入历史栈供贴图键恢复。
                 if STAGE.with(|s| s.borrow_mut().take()).is_some() {
                     STAGING.store(0, Ordering::Release);
                 } else {
-                    push_closed(hwnd);
+                    CLOSED_PIN.set(
+                        image_rect(hwnd)
+                            .ok()
+                            .map(|rect| (rect, NEXT_CLOSED_ID.fetch_add(1, Ordering::Relaxed))),
+                    );
                 }
                 let _ = RemovePropW(hwnd, w!("NextGesturesQuickPin"));
                 PostQuitMessage(0);
@@ -1857,6 +2050,178 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct HistoryTestDir(PathBuf);
+
+    impl HistoryTestDir {
+        fn new() -> Result<Self> {
+            let id = NEXT_CLOSED_ID.fetch_add(1, Ordering::Relaxed);
+            let path = history_path(&std::env::temp_dir(), id).with_extension("pin-history-test");
+            fs::create_dir(&path)?;
+            Ok(Self(path))
+        }
+    }
+
+    impl Drop for HistoryTestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir(&self.0);
+        }
+    }
+
+    fn closed_entry(dir: &Path, id: u64) -> Result<Closed> {
+        Ok(Closed {
+            id,
+            original: write_history_image(dir, id, &[15, 30, 45, 255])?,
+            shapes: Vec::new(),
+            width: 1,
+            height: 1,
+            origin: POINT::default(),
+            zoom: 1.0,
+            alpha: 255,
+        })
+    }
+
+    #[test]
+    fn closed_history_evicts_file_by_close_order_even_if_writes_finish_out_of_order() -> Result<()>
+    {
+        let dir = HistoryTestDir::new()?;
+        let mut history = ClosedHistory::new();
+        for id in (2..=HISTORY_COUNT as u64 + 2).chain([1]) {
+            history.push(closed_entry(&dir.0, id)?);
+        }
+        assert_eq!(history.entries.len(), HISTORY_COUNT);
+        assert!(!history_path(&dir.0, 1).exists());
+        assert!(!history_path(&dir.0, 2).exists());
+        assert_eq!(fs::read_dir(&dir.0)?.count(), HISTORY_COUNT);
+        assert_eq!(history.pop().unwrap().id, HISTORY_COUNT as u64 + 2);
+        drop(history);
+        assert_eq!(fs::read_dir(&dir.0)?.count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn closed_history_discards_mismatched_or_truncated_file() -> Result<()> {
+        let dir = HistoryTestDir::new()?;
+        let mut history = ClosedHistory::new();
+        history.push(closed_entry(&dir.0, 1)?);
+        let mut mismatched = closed_entry(&dir.0, 2)?;
+        mismatched.original.rewind()?;
+        mismatched.original.write_all(&1_u64.to_le_bytes())?;
+        history.push(mismatched);
+        let truncated = closed_entry(&dir.0, 3)?;
+        truncated.original.set_len(8)?;
+        history.push(truncated);
+        let error = history.pop().unwrap().into_picture().err().unwrap();
+        assert!(format!("{error:#}").contains("原图文件长度不符"));
+        assert!(!history_path(&dir.0, 3).exists());
+        let error = history.pop().unwrap().into_picture().err().unwrap();
+        assert!(format!("{error:#}").contains("原图编号与标注不符"));
+        assert!(!history_path(&dir.0, 2).exists());
+        assert_eq!(history.pop().unwrap().id, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn closed_history_files_are_removed_when_process_exits() -> Result<()> {
+        const CHILD_DIR: &str = "NEXTGESTURES_PIN_HISTORY_TEST_CHILD_DIR";
+        if let Some(dir) = std::env::var_os(CHILD_DIR) {
+            let file = write_history_image(Path::new(&dir), 1, &[15, 30, 45, 255])?;
+            assert_eq!(file.metadata()?.len(), 12);
+            assert!(ClosedHistory::new().pop().is_none());
+            std::io::stdout().write_all(b"history child created an open file\n")?;
+            std::process::exit(0);
+        }
+        let dir = HistoryTestDir::new()?;
+        let child = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--nocapture",
+                "--exact",
+                "windows::pin::tests::closed_history_files_are_removed_when_process_exits",
+            ])
+            .env(CHILD_DIR, &dir.0)
+            .output()?;
+        assert!(child.status.success());
+        assert!(
+            String::from_utf8_lossy(&child.stdout).contains("history child created an open file")
+        );
+        assert_eq!(fs::read_dir(&dir.0)?.count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn closed_picture_restores_pristine_pixels_from_disk() -> Result<()> {
+        let dir = HistoryTestDir::new()?;
+        let pixels = [15, 30, 45, 255].repeat(32 * 32);
+        let picture = Picture::new(pixels.clone(), 32, 32)?;
+        let rect = RECT {
+            left: -320,
+            top: 200,
+            ..Default::default()
+        };
+        let closed = Closed::from_picture(picture, rect, 1, &dir.0)?;
+        assert_eq!(closed.original.metadata()?.len(), pixels.len() as u64 + 8);
+        assert!(closed.shapes.is_empty());
+        let (restored, origin) = closed.into_picture()?;
+        assert_eq!(restored.pixels, pixels);
+        assert_eq!((origin.x, origin.y), (-320, 200));
+        assert!(!history_path(&dir.0, 1).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn closed_picture_replays_annotations_and_restores_display_state() -> Result<()> {
+        let dir = HistoryTestDir::new()?;
+        let pixels = [15, 30, 45, 255].repeat(80 * 72);
+        let mut picture = Picture::new(pixels.clone(), 80, 72)?;
+        for ink in [Ink::Solid, Ink::Marker, Ink::Mosaic(8), Ink::Erase] {
+            let y = match ink {
+                Ink::Solid => 10.0,
+                Ink::Marker => 15.0,
+                Ink::Mosaic(_) => 16.0,
+                Ink::Erase => 11.0,
+            };
+            picture.commit(Shape::Path {
+                points: vec![(5.0, y), (65.0, y)],
+                closed: false,
+                ink,
+                color: 0x0080_FF,
+                width: 8.0,
+            });
+        }
+        picture.commit(Shape::Text {
+            left: 30,
+            top: 30,
+            width: 2,
+            height: 2,
+            mask: vec![255, 128, 64, 0],
+            color: 0xF0_F0_F0,
+            text: "字".into(),
+            size: 18.0,
+        });
+        let composited = picture.pixels.clone();
+        assert_ne!(composited, pixels);
+        picture.alpha = 182;
+        picture.zoom = 1.25;
+        picture.folded = true;
+        picture.surface = Surface::new(64 + 2 * SHADOW, 64 + 2 * SHADOW)?;
+        picture.zoom_surface = scaled_surface(&picture.surface, (80, 80), false)?;
+        let rect = RECT {
+            left: -320,
+            top: 200,
+            ..Default::default()
+        };
+        let closed = Closed::from_picture(picture, rect, 1, &dir.0)?;
+        let (restored, origin) = closed.into_picture()?;
+        assert_eq!(restored.pixels, composited);
+        assert_eq!(restored.ink.base, pixels);
+        assert!(restored.ink.marked());
+        assert_eq!(restored.alpha, 182);
+        assert_eq!(restored.zoom, 1.25);
+        assert_eq!(restored.display_size(), (100, 90));
+        assert_eq!((origin.x, origin.y), (-330, 195));
+        Ok(())
+    }
+
     #[test]
     fn raw_gesture_bounds_preserve_negative_monitor_coordinates() {
         assert_eq!(
@@ -1958,6 +2323,109 @@ mod tests {
         assert_eq!((info.width, info.height), (1, 2));
         assert_eq!(pixels, vec![255, 0, 0, 255, 0, 0, 255, 255]);
     }
+
+    #[test]
+    fn staged_crop_coalesces_preview_and_commits_mouse_up_on_a_hidden_window() -> Result<()> {
+        struct Window(HWND);
+        impl Drop for Window {
+            fn drop(&mut self) {
+                let _ = unsafe { DestroyWindow(self.0) };
+            }
+        }
+
+        let screen = RECT { left: 100, top: 100, right: 300, bottom: 300 };
+        let initial = RECT { left: 120, top: 121, right: 170, bottom: 171 };
+        let (frozen, backdrop) = Backdrop::fixture(
+            screen,
+            (0..200 * 200).map(|i| 0xff00_0000 | i).collect(),
+        );
+        let module = unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None)? };
+        let instance = windows::Win32::Foundation::HINSTANCE(module.0);
+        let class = w!("NextGesturesCropPreviewTest");
+        ensure!(
+            unsafe {
+                RegisterClassW(&WNDCLASSW {
+                    lpfnWndProc: Some(procedure),
+                    hInstance: instance,
+                    lpszClassName: class,
+                    ..Default::default()
+                })
+            } != 0,
+            "注册裁剪预览测试窗口失败"
+        );
+        let mut picture = Picture::new(frozen.crop(initial), 50, 50)?;
+        picture.handles = true;
+        PICTURE.with(|p| *p.borrow_mut() = Some(picture));
+        STAGE.with(|s| {
+            *s.borrow_mut() = Some(Stage {
+                frozen: frozen.clone(),
+                backdrop,
+                preview: None,
+            })
+        });
+        let window = Window(unsafe {
+            CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                class,
+                w!(""),
+                WS_POPUP,
+                initial.left - SHADOW,
+                initial.top - SHADOW,
+                50 + 2 * SHADOW,
+                50 + 2 * SHADOW,
+                None,
+                None,
+                Some(instance),
+                None,
+            )?
+        });
+        let hwnd = window.0;
+        assert_eq!(image_rect(hwnd)?, initial);
+        let origin = POINT { x: initial.right, y: initial.bottom };
+        RESIZE.set(Some(Resize { edge: HTBOTTOMRIGHT, origin, rect: initial }));
+
+        queue_crop_preview(hwnd, RECT { right: 172, ..initial })?;
+        let id = CROP_TIMER.get().expect("预览定时器已启动");
+        let latest = RECT { right: 177, bottom: 179, ..initial };
+        queue_crop_preview(hwnd, latest)?;
+        assert_eq!(CROP_TIMER.get(), Some(id));
+        assert_eq!(image_rect(hwnd)?, initial);
+
+        unsafe { SendMessageW(hwnd, WM_TIMER, Some(WPARAM(id)), None) };
+        assert_eq!(image_rect(hwnd)?, latest);
+        assert_eq!(with_picture(|p| (p.width, p.height)), (50, 50));
+        queue_crop_preview(hwnd, RECT { right: 180, bottom: 182, ..initial })?;
+
+        let final_crop = RECT { right: 191, bottom: 197, ..initial };
+        let mut client = POINT { x: final_crop.right, y: final_crop.bottom };
+        ensure!(unsafe { ScreenToClient(hwnd, &mut client) }.as_bool());
+        let lp = LPARAM(
+            (u32::from(client.x as u16) | (u32::from(client.y as u16) << 16)) as isize,
+        );
+        unsafe { SendMessageW(hwnd, WM_LBUTTONUP, None, Some(lp)) };
+        assert_eq!(image_rect(hwnd)?, final_crop);
+        with_picture(|p| {
+            assert_eq!((p.width, p.height), (71, 76));
+            assert_eq!(p.pixels, frozen.crop(final_crop));
+            assert_eq!(p.ink.base, p.pixels);
+        });
+        assert!(CROP_TIMER.get().is_none());
+        assert!(PENDING_CROP.get().is_none());
+        assert!(!stage_drag_active());
+
+        DRAG_OFFSET.set(Some(POINT { x: SHADOW, y: SHADOW }));
+        queue_crop_preview(hwnd, RECT { left: 125, right: 196, ..final_crop })?;
+        let next = CROP_TIMER.get().expect("下一次拖动启动了另一个定时器");
+        assert_ne!(id, next);
+        unsafe { SendMessageW(hwnd, WM_TIMER, Some(WPARAM(id)), None) };
+        assert_eq!(image_rect(hwnd)?, final_crop);
+        unsafe { SendMessageW(hwnd, WM_CANCELMODE, None, None) };
+        assert!(CROP_TIMER.get().is_none());
+        assert!(PENDING_CROP.get().is_none());
+        assert_eq!(image_rect(hwnd)?, final_crop);
+        Ok(())
+    }
+
     #[test]
     #[ignore = "opens the native screenshot selector and moves the desktop cursor; run alone"]
     fn desktop_screenshot_toolbar_tracks_crop() {
@@ -2056,12 +2524,12 @@ mod tests {
                         "the same desktop pixel stays in place through the drag"
                     );
                 }
+                let mut client = to;
+                assert!(ScreenToClient(hwnd, &mut client).as_bool());
+                SendMessageW(hwnd, WM_LBUTTONUP, None, Some(pack(client.x, client.y)));
                 let image = image_rect(hwnd).unwrap();
                 let bar = bounds(toolbar);
                 assert_eq!(bounds(frame), bar);
-                SendMessageW(hwnd, WM_LBUTTONUP, None, None);
-                assert_eq!(image_rect(hwnd).unwrap(), image);
-                assert_eq!(bounds(toolbar), bar);
                 (image, bar)
             };
             let (moved, moved_bar) = drag(
