@@ -87,6 +87,7 @@ fn main() {
             commands::get_config,
             commands::config_path,
             commands::save_settings,
+            commands::remove_ai_action,
             commands::upsert_gesture,
             commands::remove_gesture,
             commands::set_gesture_enabled,

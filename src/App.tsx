@@ -243,6 +243,12 @@ export function App() {
     flash(t('saved'))
   })
 
+  const removeAiAction = (id: string) => trackMutation(async () => {
+    await api.removeAiAction(id)
+    await reload()
+    flash('AI 动作已删除')
+  })
+
   /** 为 AI 动作新建一条手势：跳回手势页并打开新建面板 */
   const bindAiAction = (id: string) => {
     const action = (config.settings.ai.actions ?? []).find((a: AiAction) => a.id === id)
@@ -317,6 +323,7 @@ export function App() {
           saved={config.settings.ai}
           profiles={config.profiles}
           onSaveActions={(actions) => saveAi({ actions })}
+          onRemoveAction={removeAiAction}
           onSaveService={saveAi}
           onBind={bindAiAction}
           onProtectDraft={protectAiDraft}

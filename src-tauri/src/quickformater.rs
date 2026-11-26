@@ -7,7 +7,6 @@ use gesture_core::{Action, AiSettings};
 use serde_json::{Value, json};
 use tauri::AppHandle;
 #[cfg(windows)]
-use tauri::Manager;
 
 #[cfg(windows)]
 mod native;
@@ -242,16 +241,12 @@ impl Drop for InProgress {
     }
 }
 
-pub fn spawn(app: &AppHandle, action: &Action, ai: &AiSettings) -> Result<()> {
+pub fn spawn(_app: &AppHandle, action: &Action, ai: &AiSettings) -> Result<()> {
     let mode = Mode::for_action(action, ai)?;
     #[cfg(windows)]
     {
         let target = selection::Target::current().context("没有可获取选中文本的前台窗口")?;
-        let owner = app
-            .get_webview_window("main")
-            .context("找不到剪贴板所属窗口")?
-            .hwnd()?
-            .0 as usize;
+        let owner = selection::clipboard_owner()?;
         let cursor = gesture_platform::input::cursor_pos();
         ensure!(
             !IN_PROGRESS.swap(true, Ordering::Acquire),
@@ -269,7 +264,7 @@ pub fn spawn(app: &AppHandle, action: &Action, ai: &AiSettings) -> Result<()> {
     }
     #[cfg(not(windows))]
     {
-        let _ = (app, mode, ai);
+        let _ = (_app, mode, ai);
         bail!("此平台暂未支持选中文字动作");
     }
 }

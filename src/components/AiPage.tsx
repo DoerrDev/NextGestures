@@ -9,6 +9,7 @@ interface Props {
   saved: AiSettings
   profiles: Profile[]
   onSaveActions: (actions: AiAction[]) => Promise<void>
+  onRemoveAction: (id: string) => Promise<void>
   onSaveService: (patch: Partial<AiSettings>) => Promise<void>
   onProtectDraft: (protectedDraft: boolean) => void
   /** 保存完成后，新建一条绑定该动作的手势 */
@@ -102,11 +103,13 @@ function ServiceDialog({ saved, onSave, onClose }: {
 }
 
 /** 「AI 动作」页：左侧动作库，右侧编辑器与实时预览 */
-export function AiPage({ saved, profiles, onSaveActions, onSaveService, onBind, onProtectDraft }: Props) {
+export function AiPage({ saved, profiles, onSaveActions, onRemoveAction, onSaveService, onBind, onProtectDraft }: Props) {
   const [list, setList] = useState<AiAction[]>(saved.actions ?? [])
   const [selected, select] = useState(saved.actions?.[0]?.id ?? '')
   const [sample, setSample] = useState('报价单今天发我一下。')
   const deleteDialog = useRef<HTMLDialogElement>(null)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
   const [serviceOpen, setServiceOpen] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -116,9 +119,9 @@ export function AiPage({ saved, profiles, onSaveActions, onSaveService, onBind, 
   const dirtyRef = useRef(dirty)
   dirtyRef.current = dirty
   useLayoutEffect(() => {
-    onProtectDraft(dirty || serviceOpen || busy)
+    onProtectDraft(dirty || serviceOpen || busy || deleting)
     return () => onProtectDraft(false)
-  }, [onProtectDraft, dirty, serviceOpen, busy])
+  }, [onProtectDraft, dirty, serviceOpen, busy, deleting])
   // 后端配置变化（例如别处保存）时，没有未保存改动才同步
   useEffect(() => {
     if (!dirtyRef.current) setList(saved.actions ?? [])
@@ -134,6 +137,24 @@ export function AiPage({ saved, profiles, onSaveActions, onSaveService, onBind, 
       .filter((g) => g.action.kind === 'ai_custom' && g.action.id === id)
       .map((g) => `${p.exe ? p.name : 'Global'} / ${g.name}`))
   const bindings = action ? countBindings(action.id) : []
+  const persisted = action && saved.actions?.some((a) => a.id === action.id)
+
+  const remove = async () => {
+    if (!action || deleting) return
+    setDeleteError('')
+    setDeleting(true)
+    try {
+      if (persisted) await onRemoveAction(action.id)
+      deleteDialog.current?.close()
+      setList((current) => current.filter((a) => a.id !== action.id))
+      select('')
+      setError('')
+    } catch (e) {
+      setDeleteError(`删除失败：${e}`)
+    } finally {
+      setDeleting(false)
+    }
+  }
 
   const add = () => {
     const id = crypto.randomUUID()
@@ -243,7 +264,10 @@ export function AiPage({ saved, profiles, onSaveActions, onSaveService, onBind, 
               <p className="field-note">{bindings.length ? '已绑定手势：' + bindings.join('、') : '尚未绑定手势'}</p>
               {error && <p className="error">{error}</p>}
               <div className="ai-foot">
-                <button type="button" className="btn-outline" disabled={busy} onClick={() => deleteDialog.current?.showModal()}><Trash2 size={16} />删除</button>
+                <button type="button" className="btn-outline" disabled={busy} onClick={() => {
+                  setDeleteError('')
+                  deleteDialog.current?.showModal()
+                }}><Trash2 size={16} />删除</button>
                 <span className="grow" />
                 <button type="button" className="btn-outline" disabled={busy} onClick={() => void save(true)}>保存并绑定手势</button>
                 <button type="button" className="btn-primary" disabled={busy || !dirty} onClick={() => void save()}>
@@ -271,21 +295,19 @@ export function AiPage({ saved, profiles, onSaveActions, onSaveService, onBind, 
         )}
       </div>
 
-      {action && <dialog ref={deleteDialog} className="dialog ai-delete-dialog" aria-labelledby="delete-action-title" aria-describedby="delete-action-description">
+      {action && <dialog ref={deleteDialog} className="dialog ai-delete-dialog" aria-labelledby="delete-action-title" aria-describedby="delete-action-description"
+        onCancel={(e) => { if (deleting) e.preventDefault() }}>
         <div className="dialog-head"><h2 id="delete-action-title">删除 AI 动作</h2></div>
         <div className="dialog-body" id="delete-action-description">
-          确认删除「<strong>{action.name || '新动作'}</strong>」？删除将在保存后生效。
+          确认删除「<strong>{action.name || '新动作'}</strong>」？
           {bindings.length > 0 && <p>绑定此动作的 {bindings.length} 个手势将解除绑定并停用。</p>}
+          {deleteError && <p className="error" role="alert">{deleteError}</p>}
         </div>
         <div className="dialog-foot">
-          <button type="button" className="btn-outline" autoFocus onClick={() => deleteDialog.current?.close()}>取消</button>
-          <button type="button" className="btn-primary danger" onClick={() => {
-            deleteDialog.current?.close()
-            const rest = list.filter((a) => a.id !== action.id)
-            setList(rest)
-            select(rest[0]?.id ?? '')
-            setError('')
-          }}><Trash2 size={16} />确认删除</button>
+          <button type="button" className="btn-outline" autoFocus disabled={deleting} onClick={() => deleteDialog.current?.close()}>取消</button>
+          <button type="button" className="btn-primary danger" disabled={deleting} onClick={() => void remove()}>
+            <Trash2 size={16} />{deleting ? '正在删除…' : '确认删除'}
+          </button>
         </div>
       </dialog>}
       {serviceOpen && <ServiceDialog saved={saved} onSave={onSaveService} onClose={() => setServiceOpen(false)} />}

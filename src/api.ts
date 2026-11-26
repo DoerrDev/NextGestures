@@ -143,6 +143,7 @@ export const api = {
   getConfig: () => invoke<Config>('get_config'),
   configPath: () => invoke<string>('config_path'),
   saveSettings: (settings: Settings) => invoke<void>('save_settings', { settings }),
+  removeAiAction: (id: string) => invoke<void>('remove_ai_action', { id }),
   upsertGesture: (profileId: string, gesture: Gesture) =>
     invoke<void>('upsert_gesture', { profileId, gesture }),
   removeGesture: (profileId: string, gestureId: string) =>

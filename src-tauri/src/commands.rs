@@ -84,18 +84,31 @@ pub fn save_settings(app: AppHandle, state: State<AppState>, settings: Settings)
             anyhow::ensure!(!a.id.is_empty() && ids.insert(a.id.as_str()), "AI 动作 ID 无效或重复");
             anyhow::ensure!(!a.name.trim().is_empty() && a.prompt.contains("{{selection}}"), "AI 动作需要名称与选文占位符");
         }
-        for gesture in cfg.profiles.iter_mut().flat_map(|p| &mut p.gestures) {
-            if matches!(&gesture.action, Action::AiCustom { id } if !ids.contains(id.as_str())) {
-                gesture.enabled = false;
-                gesture.action = Action::None;
-            }
-        }
+        clear_ai_bindings(cfg, |id| !ids.contains(id));
         cfg.settings = settings;
         Ok(())
     })?;
     // 「触发提示置顶」立即生效，不必等下一次手势
     let _ = crate::overlay::apply_z_order(&app);
     Ok(())
+}
+
+#[tauri::command]
+pub fn remove_ai_action(state: State<AppState>, id: String) -> R<()> {
+    update(&state, |cfg| {
+        cfg.settings.ai.actions.retain(|action| action.id != id);
+        clear_ai_bindings(cfg, |bound_id| bound_id == id);
+        Ok(())
+    })
+}
+
+fn clear_ai_bindings(cfg: &mut Config, removed: impl Fn(&str) -> bool) {
+    for gesture in cfg.profiles.iter_mut().flat_map(|p| &mut p.gestures) {
+        if matches!(&gesture.action, Action::AiCustom { id } if removed(id)) {
+            gesture.enabled = false;
+            gesture.action = Action::None;
+        }
+    }
 }
 
 #[tauri::command]

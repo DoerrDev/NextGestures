@@ -10,6 +10,45 @@ use windows::Win32::UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*};
 use windows::core::w;
 
 const UNICODE_TEXT: u32 = 13;
+
+/// 剪贴板所有者：常驻的隐藏消息窗口，不依赖任何 Tauri 窗口是否存在。
+/// 窗口随创建线程存亡，因此放在专用线程里并跑消息循环。
+pub fn clipboard_owner() -> Result<usize> {
+    use std::sync::OnceLock;
+    static OWNER: OnceLock<usize> = OnceLock::new();
+    if let Some(owner) = OWNER.get() {
+        return Ok(*owner);
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("clipboard-owner".into())
+        .spawn(move || unsafe {
+            let hwnd = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!("NextGesturesClipboardOwner"),
+                WINDOW_STYLE::default(),
+                0,
+                0,
+                0,
+                0,
+                Some(HWND_MESSAGE),
+                None,
+                None,
+                None,
+            );
+            let _ = tx.send(hwnd.map(|h| h.0 as usize).map_err(|e| e.to_string()));
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                let _ = DispatchMessageW(&msg);
+            }
+        })?;
+    let owner = rx
+        .recv()
+        .context("剪贴板所有者线程启动失败")?
+        .map_err(|e| anyhow::anyhow!("创建剪贴板所有者窗口失败: {e}"))?;
+    Ok(*OWNER.get_or_init(|| owner))
+}
 static CLIPBOARD_ACCESS: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Copy, PartialEq, Eq)]
