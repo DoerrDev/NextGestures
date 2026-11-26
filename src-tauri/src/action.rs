@@ -24,7 +24,9 @@ fn spawn_internal(app: AppHandle, action: Action, chord: Option<hotkey::Chord>) 
     let foreground = chord.map(|_| window::foreground_hwnd());
     std::thread::spawn(move || {
         if let Some(chord) = chord
-            && (!chord.wait_for_release() || foreground != Some(window::foreground_hwnd()))
+            && (!chord.wait_for_release()
+                || foreground != Some(window::foreground_hwnd())
+                || app.state::<AppState>().shortcuts_paused())
         {
             return;
         }

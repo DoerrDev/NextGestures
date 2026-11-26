@@ -13,6 +13,7 @@ pub struct AppState {
     /// 上次由本进程写入时的 mtime，用来区分外部编辑
     mtime: RwLock<Option<SystemTime>>,
     pub recording: AtomicBool,
+    shortcuts_paused: AtomicBool,
 }
 
 impl AppState {
@@ -23,6 +24,7 @@ impl AppState {
             path,
             config: RwLock::new(config),
             recording: AtomicBool::new(false),
+            shortcuts_paused: AtomicBool::new(false),
         };
         state.push_to_hook();
         Ok(state)
@@ -47,7 +49,7 @@ impl AppState {
         }
         // 旧版配置会在加载时迁移并写回，记录写回后的 mtime，免得下一轮又当成外部修改
         let fresh = Config::load(&self.path)?;
-        hotkey::set(shortcut_bindings(&fresh, false)?, false)?;
+        self.sync_shortcuts(&fresh, false)?;
         *config = fresh;
         *self.mtime.write().unwrap() = mtime_of(&self.path);
         drop(config);
@@ -70,24 +72,47 @@ impl AppState {
 
     pub fn init_shortcuts(&self) -> Result<()> {
         let config = self.config.read().unwrap();
-        hotkey::set(shortcut_bindings(&config, false)?, false)
+        self.sync_shortcuts(&config, false)
     }
 
-    /// 修改配置并落盘。会影响快捷键的改动先重新注册（严格模式），失败则整体不生效；
-    /// 落盘失败时恢复原来的注册。
+    pub fn shortcuts_paused(&self) -> bool {
+        self.shortcuts_paused.load(Relaxed)
+    }
+
+    pub fn toggle_shortcuts_paused(&self) -> Result<bool> {
+        // 和配置写入串行化，确保恢复时注册的是最新配置。
+        let config = self.config.write().unwrap();
+        let paused = !self.shortcuts_paused();
+        if paused {
+            hotkey::set(Vec::new(), false)?;
+        } else {
+            hotkey::set(shortcut_bindings(&config, false)?, false)?;
+        }
+        self.shortcuts_paused.store(paused, Relaxed);
+        Ok(paused)
+    }
+
+    fn sync_shortcuts(&self, config: &Config, strict: bool) -> Result<()> {
+        // 暂停期间仍校验组合键和重复项，系统占用情况留待恢复时检查。
+        let bindings = shortcut_bindings(config, strict)?;
+        if !self.shortcuts_paused() {
+            hotkey::set(bindings, strict)?;
+        }
+        Ok(())
+    }
+
+    /// 修改配置并落盘。先校验快捷键，运行时则一并重新注册；落盘失败时恢复原来的注册。
     pub fn update(&self, update: impl FnOnce(&mut Config) -> Result<()>) -> Result<()> {
         let mut config = self.config.write().unwrap();
         let mut next = config.clone();
         update(&mut next)?;
         let changed = hotkey_spec(&next) != hotkey_spec(&config);
         if changed {
-            hotkey::set(shortcut_bindings(&next, true)?, true)?;
+            self.sync_shortcuts(&next, true)?;
         }
         if let Err(error) = next.save(&self.path) {
             if changed {
-                let restore =
-                    shortcut_bindings(&config, false).and_then(|old| hotkey::set(old, false));
-                if let Err(restore_error) = restore {
+                if let Err(restore_error) = self.sync_shortcuts(&config, false) {
                     log::warn!("恢复快捷键失败: {restore_error:#}");
                 }
             }
@@ -166,4 +191,62 @@ fn shortcut_bindings(config: &Config, strict: bool) -> Result<Vec<hotkey::Bindin
 
 fn mtime_of(path: &std::path::Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        MOD_ALT, MOD_CONTROL, MOD_SHIFT, RegisterHotKey, UnregisterHotKey, VIRTUAL_KEY, VK_F21,
+        VK_F22,
+    };
+
+    #[test]
+    #[ignore = "checks temporary global hotkey registrations on the Windows desktop"]
+    fn paused_shortcuts_release_keys_and_resume_with_latest_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::load(dir.path().join("config.toml")).unwrap();
+        let keys = |key: &str| ["ctrl", "alt", "shift", key].map(String::from).to_vec();
+        let available = |key: VIRTUAL_KEY| unsafe {
+            let result = RegisterHotKey(None, 1, MOD_CONTROL | MOD_ALT | MOD_SHIFT, key.0.into());
+            if result.is_ok() {
+                UnregisterHotKey(None, 1).unwrap();
+            }
+            result.is_ok()
+        };
+        assert!(available(VK_F21) && available(VK_F22));
+        hotkey::start(|_| {});
+        state.init_shortcuts().unwrap();
+        state
+            .update(|cfg| {
+                cfg.settings.toggle_hotkey = keys("f21");
+                Ok(())
+            })
+            .unwrap();
+        assert!(!available(VK_F21));
+
+        let gestures_enabled = hook::is_enabled();
+        assert!(state.toggle_shortcuts_paused().unwrap());
+        assert!(available(VK_F21));
+        assert!(
+            state
+                .update(|cfg| {
+                    cfg.settings.toggle_hotkey = vec!["ctrl".into()];
+                    Ok(())
+                })
+                .is_err()
+        );
+        state
+            .update(|cfg| {
+                cfg.settings.toggle_hotkey = keys("f22");
+                Ok(())
+            })
+            .unwrap();
+        assert!(available(VK_F22));
+
+        assert!(!state.toggle_shortcuts_paused().unwrap());
+        assert!(available(VK_F21) && !available(VK_F22));
+        assert_eq!(hook::is_enabled(), gestures_enabled);
+        assert!(state.toggle_shortcuts_paused().unwrap());
+    }
 }

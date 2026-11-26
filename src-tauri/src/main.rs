@@ -19,17 +19,43 @@ use tauri::{App, AppHandle, Emitter, Manager, Wry};
 use gesture_platform::{hook, hotkey};
 use state::AppState;
 
-/// 托盘里的「启用手势」勾选项，供各处开关同步
-struct TrayToggle(CheckMenuItem<Wry>);
+struct TrayToggles {
+    gestures: CheckMenuItem<Wry>,
+    shortcuts_paused: CheckMenuItem<Wry>,
+}
 
 /// 统一的手势总开关入口：钩子状态 + 托盘勾选 + 通知前端
 pub fn set_enabled(app: &AppHandle, on: bool) {
     hook::set_enabled(on);
-    if let Some(t) = app.try_state::<TrayToggle>() {
-        let _ = t.0.set_checked(on);
+    if let Some(toggles) = app.try_state::<TrayToggles>() {
+        let _ = toggles.gestures.set_checked(on);
     }
     let _ = app.emit("enabled:changed", on);
     engine::toast(app, if on { "手势已启用" } else { "手势已停用" });
+}
+
+fn toggle_shortcuts(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let message = match state.toggle_shortcuts_paused() {
+        Ok(true) => "快捷键已暂停".into(),
+        Ok(false) => {
+            let failed = hotkey::failures();
+            if failed.is_empty() {
+                "快捷键已恢复".into()
+            } else {
+                format!("快捷键已恢复，以下组合键被占用：{}", failed.join("、"))
+            }
+        }
+        Err(error) => {
+            log::warn!("切换快捷键暂停状态失败: {error:#}");
+            "切换快捷键暂停状态失败".into()
+        }
+    };
+    let _ = app
+        .state::<TrayToggles>()
+        .shortcuts_paused
+        .set_checked(state.shortcuts_paused());
+    engine::toast(app, &message);
 }
 
 fn main() {
@@ -140,9 +166,16 @@ fn dispatch_shortcut(app: &AppHandle, chord: hotkey::Chord) {
     let state = app.state::<AppState>();
     // Registration updates wait for this thread, so never block on the configuration lock here.
     let Ok(config) = state.config.try_read() else { return };
+    if state.shortcuts_paused() {
+        return;
+    }
     if hotkey::Chord::parse(&config.settings.toggle_hotkey).ok() == Some(chord) {
         let handle = app.clone();
-        let _ = app.run_on_main_thread(move || set_enabled(&handle, !hook::is_enabled()));
+        let _ = app.run_on_main_thread(move || {
+            if !handle.state::<AppState>().shortcuts_paused() {
+                set_enabled(&handle, !hook::is_enabled());
+            }
+        });
         return;
     }
     // 前台程序的配置组优先，其次 Global；「交给程序自带手势」的程序里不响应
@@ -172,13 +205,32 @@ pub fn notify_main_visibility(app: &AppHandle, visible: bool) {
 
 fn build_tray(app: &mut App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
-    let toggle =
+    let gestures =
         CheckMenuItem::with_id(app, "enabled", "启用手势", true, hook::is_enabled(), None::<&str>)?;
+    let shortcuts_paused = CheckMenuItem::with_id(
+        app,
+        "shortcuts-paused",
+        "暂停快捷键",
+        true,
+        app.state::<AppState>().shortcuts_paused(),
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu =
-        Menu::with_items(app, &[&open, &toggle, &PredefinedMenuItem::separator(app)?, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &open,
+            &gestures,
+            &shortcuts_paused,
+            &PredefinedMenuItem::separator(app)?,
+            &quit,
+        ],
+    )?;
 
-    app.manage(TrayToggle(toggle));
+    app.manage(TrayToggles {
+        gestures,
+        shortcuts_paused,
+    });
     TrayIconBuilder::with_id("tray")
         .icon(tray_icon())
         .tooltip("NextGestures")
@@ -187,6 +239,7 @@ fn build_tray(app: &mut App) -> tauri::Result<()> {
         .on_menu_event(move |app, event| match event.id.as_ref() {
             "settings" => show_settings(app),
             "enabled" => set_enabled(app, !hook::is_enabled()),
+            "shortcuts-paused" => toggle_shortcuts(app),
             "quit" => app.exit(0),
             _ => {}
         })
