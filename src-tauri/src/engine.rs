@@ -172,7 +172,7 @@ impl TrailBuf {
         if self.pts.is_empty() {
             return;
         }
-        let _ = app.emit_to(overlay::LABEL, "trail:points", &self.pts);
+        overlay::emit(app, "trail:points", &self.pts);
         self.pts.clear();
         self.last = Instant::now();
     }
@@ -237,10 +237,7 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
                 let exe = window::foreground_exe();
                 let hit = lookup(&app, &exe, Some(button), Some(region), &[], false, &[]);
                 match hit {
-                    Some(hit) => {
-                        let _ = overlay::ensure(&app);
-                        fire(&app, &exe, hit, true);
-                    }
+                    Some(hit) => fire(&app, &exe, hit, true),
                     None => input::click(button),
                 }
             }
@@ -317,12 +314,12 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
             HookEvent::End { button, region, points, times, wheel, left_click } => {
                 let s = session.take();
                 if recording(&app) {
-                    let _ = app.emit_to(overlay::LABEL, "trail:end", ());
+                    overlay::emit(&app, "trail:end", ());
                     finish_recording(&app, button, region, &points, &times, wheel, left_click);
                     continue;
                 }
                 if s.as_ref().is_some_and(|s| s.fired) {
-                    let _ = app.emit_to(overlay::LABEL, "trail:end", ());
+                    overlay::emit(&app, "trail:end", ());
                     continue;
                 }
                 let exe = s.as_ref().map(|s| s.exe.clone()).unwrap_or_else(window::foreground_exe);
@@ -340,11 +337,11 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
                         nearest(&app, &exe, button, region, &wheel, left_click, &points)
                     ),
                 }
-                let _ = app.emit_to(overlay::LABEL, "trail:end", ());
+                overlay::emit(&app, "trail:end", ());
             }
             HookEvent::Cancel => {
                 let s = session.take();
-                let _ = app.emit_to(overlay::LABEL, "trail:end", ());
+                overlay::emit(&app, "trail:end", ());
                 if s.is_none_or(|s| s.button.is_some()) {
                     stop_recording(&app);
                 }
@@ -352,7 +349,7 @@ fn run(app: AppHandle, rx: Receiver<HookEvent>) {
             HookEvent::StrokeLimit => {
                 const MESSAGE: &str = "你也太无聊了";
                 session = None;
-                let _ = app.emit_to(overlay::LABEL, "trail:end", ());
+                overlay::emit(&app, "trail:end", ());
                 if recording(&app) {
                     stop_recording(&app);
                     let _ = app.emit("gesture:record-failed", MESSAGE);
@@ -386,11 +383,10 @@ fn begin_trail(app: &AppHandle) -> bool {
             hint_offset_y: cfg.settings.gesture_hint_offset_y,
         }
     };
-    let _ = overlay::ensure(app);
     let o = overlay::origin(app);
     style.origin = [o.0, o.1];
     let show_trail = style.show_trail;
-    let _ = app.emit_to(overlay::LABEL, "trail:begin", style);
+    overlay::emit(app, "trail:begin", style);
     show_trail
 }
 
@@ -489,7 +485,7 @@ fn on_partial(app: &AppHandle, s: &mut Session, movement: bool) {
     if name != s.shown_name {
         s.shown_name = name.clone();
         if show_hint {
-            let _ = app.emit_to(overlay::LABEL, "trail:match", name);
+            overlay::emit(app, "trail:match", name);
         }
     }
     if let Some(hit) = hit
@@ -571,7 +567,6 @@ fn fire_dwell(app: &AppHandle, h: Hover) {
         })
     };
     if let Some(hit) = hit {
-        let _ = overlay::ensure(app);
         fire(app, &h.exe, hit, true);
     }
 }
@@ -656,8 +651,8 @@ fn fire(app: &AppHandle, exe: &str, hit: Hit, show_hint: bool) {
     if show_hint && show_match_hint(app) {
         let state = app.state::<AppState>();
         let cfg = state.config.read().unwrap();
-        let _ = app.emit_to(
-            overlay::LABEL,
+        overlay::emit(
+            app,
             "gesture:hint-show",
             GestureHint {
                 name: hit.name.clone(),
@@ -668,7 +663,7 @@ fn fire(app: &AppHandle, exe: &str, hit: Hit, show_hint: bool) {
             },
         );
     }
-    let _ = app.emit_to(overlay::LABEL, "gesture:execute", ());
+    overlay::emit(app, "gesture:execute", ());
     let _ = app.emit(
         "gesture:fired",
         Fired {
@@ -684,11 +679,10 @@ fn fire(app: &AppHandle, exe: &str, hit: Hit, show_hint: bool) {
 
 /// 在桌面 overlay 上弹一条短提示，样式沿用手势提示的字体/颜色/偏移
 pub fn toast(app: &AppHandle, text: &str) {
-    let _ = overlay::ensure(app);
     let state = app.state::<AppState>();
     let cfg = state.config.read().unwrap();
-    let _ = app.emit_to(
-        overlay::LABEL,
+    overlay::emit(
+        app,
         "gesture:toast",
         GestureHint {
             name: text.to_string(),

@@ -32,7 +32,7 @@ pub fn set_enabled(enabled: bool) -> Result<(), String> {
         }
         let result = if enabled {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            let value = to_wide(&format!("\"{}\"", exe.display()));
+            let value = to_wide(&format!("\"{}\" {}", exe.display(), crate::settings_window::TRAY_ARG));
             let bytes = std::slice::from_raw_parts(value.as_ptr() as *const u8, value.len() * 2);
             RegSetValueExW(hkey, VALUE_NAME, None, REG_SZ, Some(bytes))
         } else {

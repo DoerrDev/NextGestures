@@ -9,12 +9,13 @@ mod overlay;
 mod pin;
 mod quickformater;
 mod recorder;
+mod settings_window;
 mod state;
 
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{App, AppHandle, Emitter, Manager, Wry};
+use tauri::{App, AppHandle, Emitter, Manager, RunEvent, WindowEvent, Wry};
 
 use gesture_platform::{hook, hotkey};
 use state::AppState;
@@ -60,6 +61,7 @@ fn toggle_shortcuts(app: &AppHandle) {
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let tray_only = std::env::args_os().skip(1).any(|arg| arg == settings_window::TRAY_ARG);
 
     // 必须在 Builder 构建窗口之前注入，否则前端首帧 invoke 会拿不到 State
     let dir = std::path::PathBuf::from(std::env::var("APPDATA").expect("缺少 APPDATA"))
@@ -71,12 +73,16 @@ fn main() {
         // 设置窗口在前台时快捷键录制就一个键都收不到。我们不用 DeviceEvent，直接关掉
         .device_event_filter(tauri::DeviceEventFilter::Always)
         // 只允许一个后台实例运行；重复启动时唤醒首实例的设置窗口。
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            show_settings(app);
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if !args.iter().skip(1).any(|arg| arg == settings_window::TRAY_ARG) {
+                settings_window::show(app);
+            }
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(state)
+        .manage(settings_window::Lifecycle::default())
+        .manage(overlay::Overlay::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
             commands::config_path,
@@ -105,16 +111,16 @@ fn main() {
             commands::list_installed_apps,
             commands::show_gesture_hint_preview,
             commands::hide_gesture_hint_preview,
+            overlay::overlay_ready,
             commands::hide_settings,
+            settings_window::release_settings,
             commands::is_autostart_enabled,
             commands::set_autostart_enabled,
             commands::feedback_chat,
             commands::feedback_submit,
             commands::feedback_ack_unread,
         ])
-        .setup(|app| {
-            size_main_window(app.handle());
-            overlay::setup(app.handle())?;
+        .setup(move |app| {
             engine::start(app.handle());
             build_tray(app)?;
             app.manage(feedback::Backend::new(app.package_info().version.to_string()));
@@ -122,43 +128,43 @@ fn main() {
             let handle = app.handle().clone();
             hotkey::start(move |chord| dispatch_shortcut(&handle, chord));
             app.state::<AppState>().init_shortcuts()?;
+            overlay::prewarm(app.handle());
+            if !tray_only {
+                settings_window::show(app.handle());
+            }
             Ok(())
         })
         .on_window_event(|win, event| {
-            if win.label() == "main"
-                && matches!(event, tauri::WindowEvent::Focused(false) | tauri::WindowEvent::CloseRequested { .. })
-            {
-                gesture_platform::keyrec::sequence::cancel(None);
+            if win.label() != settings_window::LABEL {
+                return;
             }
-            // 主窗口关闭只是隐藏，程序常驻托盘
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event
-                && win.label() == "main"
-            {
-                api.prevent_close();
-                let _ = win.hide();
-                notify_main_visibility(win.app_handle(), false);
-            }
-            // 最小化同样不会让 WebView2 停掉 requestAnimationFrame
-            if let tauri::WindowEvent::Resized(_) = event
-                && win.label() == "main"
-            {
-                let shown = win.is_visible().unwrap_or(true) && !win.is_minimized().unwrap_or(false);
-                notify_main_visibility(win.app_handle(), shown);
+            match event {
+                WindowEvent::Focused(false) => gesture_platform::keyrec::sequence::cancel(None),
+                WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
+                    settings_window::hide(win.app_handle());
+                }
+                WindowEvent::Resized(_) => {
+                    let shown = win.is_visible().unwrap_or(true) && !win.is_minimized().unwrap_or(false);
+                    notify_main_visibility(win.app_handle(), shown);
+                }
+                _ => {}
             }
         })
-        .run(tauri::generate_context!())
-        .expect("启动 NextGestures 失败");
-}
-
-/// 主窗口默认占当前显示器 65% 宽、75% 高
-fn size_main_window(app: &AppHandle) {
-    let Some(win) = app.get_webview_window("main") else { return };
-    let Ok(Some(monitor)) = win.current_monitor() else { return };
-    let scale = monitor.scale_factor();
-    let screen = monitor.size().to_logical::<f64>(scale);
-    let size = tauri::LogicalSize::new((screen.width * 0.65).max(880.0), (screen.height * 0.75).max(560.0));
-    let _ = win.set_size(size);
-    let _ = win.center();
+        .build(tauri::generate_context!())
+        .expect("启动 NextGestures 失败")
+        .run(|app, event| match event {
+            // 最后一个 WebView 被释放后，托盘、手势和快捷键仍需运行。
+            RunEvent::ExitRequested { code: None, api, .. } => api.prevent_exit(),
+            RunEvent::WindowEvent { label, event: WindowEvent::Destroyed, .. } => {
+                if label == settings_window::LABEL {
+                    settings_window::on_destroyed(app);
+                } else if label == overlay::LABEL {
+                    overlay::on_destroyed(app);
+                }
+            }
+            _ => {}
+        });
 }
 
 fn dispatch_shortcut(app: &AppHandle, chord: hotkey::Chord) {
@@ -188,19 +194,10 @@ fn dispatch_shortcut(app: &AppHandle, chord: hotkey::Chord) {
     action::spawn_from_shortcut(app.clone(), action, chord);
 }
 
-fn show_settings(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.show();
-        let _ = w.unminimize();
-        let _ = w.set_focus();
-    }
-    notify_main_visibility(app, true);
-}
-
 /// 隐藏到托盘时 WebView2 不会把页面标成 hidden，前端动画会继续空转吃 GPU，
 /// 这里显式告诉前端主窗口是否在屏幕上
 pub fn notify_main_visibility(app: &AppHandle, visible: bool) {
-    let _ = app.emit_to("main", "main:visibility", visible);
+    let _ = app.emit_to(settings_window::LABEL, "main:visibility", visible);
 }
 
 fn build_tray(app: &mut App) -> tauri::Result<()> {
@@ -237,7 +234,7 @@ fn build_tray(app: &mut App) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, event| match event.id.as_ref() {
-            "settings" => show_settings(app),
+            "settings" => settings_window::show(app),
             "enabled" => set_enabled(app, !hook::is_enabled()),
             "shortcuts-paused" => toggle_shortcuts(app),
             "quit" => app.exit(0),
@@ -250,7 +247,7 @@ fn build_tray(app: &mut App) -> tauri::Result<()> {
                 ..
             } = event
             {
-                show_settings(tray.app_handle());
+                settings_window::show(tray.app_handle());
             }
         })
         .build(app)?;

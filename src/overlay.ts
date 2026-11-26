@@ -1,4 +1,5 @@
 import { listen } from '@tauri-apps/api/event'
+import { invoke } from '@tauri-apps/api/core'
 
 interface TrailBegin {
   origin: [number, number]
@@ -56,6 +57,14 @@ let raf = 0
  */
 let dirty = false
 let appliedFilter = ''
+let trailEndTimer = 0
+const registrations: Promise<unknown>[] = []
+const replayHandlers = new Map<string, (payload: unknown) => void>()
+
+function onOverlayEvent<T>(event: string, handle: (payload: T) => void) {
+  replayHandlers.set(event, (payload) => handle(payload as T))
+  registrations.push(listen<T>(event, ({ payload }) => handle(payload)))
+}
 
 label.addEventListener('animationend', (e) => {
   if (e.animationName !== 'hint-drop-in' || !labelMode) return
@@ -81,6 +90,7 @@ function clearDirty() {
 }
 
 function clearTrail() {
+  window.clearTimeout(trailEndTimer)
   clearDirty()
   matched = false
   points.length = 0
@@ -118,8 +128,9 @@ function applyStyle() {
 function repaint() {
   clearDirty()
   if (!style.showTrail) return
-  applyStyle()
   if (points.length < 2) return
+  resize()
+  applyStyle()
   ctx.beginPath()
   ctx.moveTo(points[0][0], points[0][1])
   for (let i = 1; i < points.length - 1; i++) {
@@ -133,95 +144,121 @@ function repaint() {
   dirty = true
 }
 
-resize()
 window.addEventListener('resize', () => {
-  resize()
-  clearTrail()
-  if (labelMode !== 'settings') hideLabel(false)
-  else placeLabel()
-  applyStyle()
+  if (points.length) schedule()
+  if (labelMode) placeLabel()
 })
 
 /** 传入的是虚拟屏幕物理坐标，减去窗口原点即为画布坐标 */
 const toLocal = (p: [number, number]): [number, number] => [p[0] - origin[0], p[1] - origin[1]]
 
-void listen<TrailBegin>('trail:begin', (e) => {
-  resize()
+onOverlayEvent<TrailBegin>('trail:begin', (payload) => {
   clearTrail()
   if (labelMode !== 'settings') hideLabel(false)
-  origin = e.payload.origin
+  origin = payload.origin
   style = {
-    color: e.payload.color,
-    width: e.payload.width,
-    showTrail: e.payload.show_trail,
-    glowColor: e.payload.glow_color,
-    glowBlur: e.payload.glow_blur,
-    missColor: e.payload.miss_color,
+    color: payload.color,
+    width: payload.width,
+    showTrail: payload.show_trail,
+    glowColor: payload.glow_color,
+    glowBlur: payload.glow_blur,
+    missColor: payload.miss_color,
   }
   if (labelMode !== 'settings') {
     setLabelStyle(
-      e.payload.hint_font_size,
-      e.payload.hint_color,
-      e.payload.hint_offset_x,
-      e.payload.hint_offset_y,
+      payload.hint_font_size,
+      payload.hint_color,
+      payload.hint_offset_x,
+      payload.hint_offset_y,
     )
   }
   applyStyle()
 })
 
 /** 后端按 ~4ms 批量推送（见 engine::TRAIL_FLUSH），关闭轨迹显示时不会推送 */
-void listen<[number, number][]>('trail:points', (e) => {
+onOverlayEvent<[number, number][]>('trail:points', (payload) => {
   // 不显示轨迹时什么都不用画，也就不必每帧去碰全屏画布
   if (!style.showTrail) return
-  for (const p of e.payload) points.push(toLocal(p))
+  for (const p of payload) points.push(toLocal(p))
   schedule()
 })
 
-void listen<string | null>('trail:match', (e) => {
+onOverlayEvent<string | null>('trail:match', (name) => {
   if (labelMode === 'settings') return
-  const hit = !!e.payload
+  const hit = !!name
   if (hit !== matched) {
     matched = hit
     repaint()
   }
-  if (!e.payload) {
+  if (!name) {
     if (labelMode === 'preview') hideLabel(true)
     return
   }
-  showLabel(e.payload, 'preview')
+  showLabel(name, 'preview')
 })
 
-void listen('trail:end', () => {
+function endTrail() {
   clearTrail()
   if (labelMode === 'preview') hideLabel(true)
+}
+onOverlayEvent('trail:end', endTrail)
+
+onOverlayEvent<GestureHint>('gesture:hint-show', (hint) => {
+  setLabelStyle(hint.font_size, hint.color, hint.offset_x, hint.offset_y)
+  showLabel(hint.name, 'preview')
 })
 
-void listen<GestureHint>('gesture:hint-show', (e) => {
-  setLabelStyle(e.payload.font_size, e.payload.color, e.payload.offset_x, e.payload.offset_y)
-  showLabel(e.payload.name, 'preview')
+onOverlayEvent('gesture:execute', () => {
+  if (labelMode === 'preview') {
+    labelTimer = window.setTimeout(() => {
+      if (labelMode === 'preview') hideLabel(true)
+    }, 100)
+  }
 })
 
-void listen('gesture:execute', () => {
-  if (labelMode === 'preview') window.setTimeout(() => hideLabel(true), 100)
-})
-
-void listen<GestureHint>('gesture:toast', (e) => {
+onOverlayEvent<GestureHint>('gesture:toast', (hint) => {
   if (labelMode === 'settings') return
-  setLabelStyle(e.payload.font_size, e.payload.color, e.payload.offset_x, e.payload.offset_y)
-  showLabel(e.payload.name, 'toast')
+  setLabelStyle(hint.font_size, hint.color, hint.offset_x, hint.offset_y)
+  showLabel(hint.name, 'toast')
   labelTimer = window.setTimeout(() => {
     if (labelMode === 'toast') hideLabel(true)
   }, 1400)
 })
 
-void listen<GestureHintPreview>('gesture:hint-preview', (e) => {
-  setLabelStyle(e.payload.font_size, e.payload.color, e.payload.offset_x, e.payload.offset_y)
+onOverlayEvent<GestureHintPreview>('gesture:hint-preview', (hint) => {
+  setLabelStyle(hint.font_size, hint.color, hint.offset_x, hint.offset_y)
   if (labelMode !== 'settings') showLabel('打开 Jenkins', 'settings')
 })
 
-void listen('gesture:hint-preview:hide', () => {
+onOverlayEvent('gesture:hint-preview:hide', () => {
   if (labelMode === 'settings') hideLabel(true)
 })
+
+type PendingEvent = { event: string; payload: unknown }
+registrations.push(listen<PendingEvent[]>('overlay:replay', ({ payload }) => {
+  let lastTrailEvent = -1
+  for (let i = payload.length - 1; i >= 0; i--) {
+    if (payload[i].event === 'trail:begin' || payload[i].event === 'trail:end') {
+      lastTrailEvent = i
+      break
+    }
+  }
+  payload.forEach(({ event, payload: value }, index) => {
+    // If a quick gesture already ended during WebView startup, render its final stroke
+    // briefly before clearing. A fresh trail cancels this delay.
+    if (event === 'trail:end' && index === lastTrailEvent && points.length > 1) {
+      schedule()
+      trailEndTimer = window.setTimeout(endTrail, 120)
+    } else {
+      replayHandlers.get(event)?.(value)
+    }
+  })
+}))
+void Promise.all(registrations).then(() => {
+  const generation = (window as Window & { __nextGesturesOverlayGeneration?: number }).__nextGesturesOverlayGeneration
+  if (generation === undefined) return
+  return invoke('overlay_ready', { generation })
+}).catch((error) => console.error('Overlay initialization failed', error))
 
 function setLabelStyle(fontSize: number, color: string, offsetX: number, offsetY: number) {
   label.style.fontSize = `${fontSize}px`

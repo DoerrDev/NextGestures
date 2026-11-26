@@ -291,22 +291,17 @@ pub async fn test_action(app: AppHandle, window: tauri::WebviewWindow, action: A
 /// 设置页打开「触发提示」时向实际桌面 overlay 投送预览，不写入配置。
 #[tauri::command]
 pub fn show_gesture_hint_preview(app: AppHandle, hint: GestureHintPreview) {
-    let _ = crate::overlay::ensure(&app);
-    let _ = app.emit_to(crate::overlay::LABEL, "gesture:hint-preview", hint);
+    crate::overlay::show_preview(&app, hint);
 }
 
 #[tauri::command]
 pub fn hide_gesture_hint_preview(app: AppHandle) {
-    let _ = app.emit_to(crate::overlay::LABEL, "gesture:hint-preview:hide", ());
+    crate::overlay::hide_preview(&app);
 }
 
 #[tauri::command]
 pub fn hide_settings(app: AppHandle) {
-    keyrec::sequence::cancel(None);
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.hide();
-    }
-    crate::notify_main_visibility(&app, false);
+    crate::settings_window::hide(&app);
 }
 
 #[tauri::command]

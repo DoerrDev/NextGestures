@@ -1402,7 +1402,7 @@ dependencies = [
 
 [[package]]
 name = "gesture-core"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "anyhow",
  "log",
@@ -1412,7 +1412,7 @@ dependencies = [
 
 [[package]]
 name = "gesture-platform"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -2389,7 +2389,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "next-gestures"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "anyhow",
  "crossbeam-channel",

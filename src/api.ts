@@ -175,6 +175,7 @@ export const api = {
     invoke<void>('show_gesture_hint_preview', { hint }),
   hideGestureHintPreview: () => invoke<void>('hide_gesture_hint_preview'),
   hideSettings: () => invoke<void>('hide_settings'),
+  releaseSettings: (token: number) => invoke<void>('release_settings', { token }),
   isAutostartEnabled: () => invoke<boolean>('is_autostart_enabled'),
   setAutostartEnabled: (enabled: boolean) => invoke<void>('set_autostart_enabled', { enabled }),
   feedbackChat: () => invoke<ChatItem[]>('feedback_chat'),

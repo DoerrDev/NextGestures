@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Check, Plug, Plus, Search, TextCursorInput, Trash2, X } from 'lucide-react'
 import type { AiAction, AiSettings, Profile } from '../api'
 import { ALL_AI_ICON_NAMES, COMMON_AI_ICONS, DEFAULT_AI_ICON, aiIcon } from './aiIcons'
@@ -10,6 +10,7 @@ interface Props {
   profiles: Profile[]
   onSaveActions: (actions: AiAction[]) => Promise<void>
   onSaveService: (patch: Partial<AiSettings>) => Promise<void>
+  onProtectDraft: (protectedDraft: boolean) => void
   /** 保存完成后，新建一条绑定该动作的手势 */
   onBind: (id: string) => void
 }
@@ -101,7 +102,7 @@ function ServiceDialog({ saved, onSave, onClose }: {
 }
 
 /** 「AI 动作」页：左侧动作库，右侧编辑器与实时预览 */
-export function AiPage({ saved, profiles, onSaveActions, onSaveService, onBind }: Props) {
+export function AiPage({ saved, profiles, onSaveActions, onSaveService, onBind, onProtectDraft }: Props) {
   const [list, setList] = useState<AiAction[]>(saved.actions ?? [])
   const [selected, select] = useState(saved.actions?.[0]?.id ?? '')
   const [sample, setSample] = useState('报价单今天发我一下。')
@@ -114,6 +115,10 @@ export function AiPage({ saved, profiles, onSaveActions, onSaveService, onBind }
   const dirty = JSON.stringify(list) !== JSON.stringify(saved.actions ?? [])
   const dirtyRef = useRef(dirty)
   dirtyRef.current = dirty
+  useLayoutEffect(() => {
+    onProtectDraft(dirty || serviceOpen || busy)
+    return () => onProtectDraft(false)
+  }, [onProtectDraft, dirty, serviceOpen, busy])
   // 后端配置变化（例如别处保存）时，没有未保存改动才同步
   useEffect(() => {
     if (!dirtyRef.current) setList(saved.actions ?? [])

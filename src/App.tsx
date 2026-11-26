@@ -70,6 +70,24 @@ export function App() {
   const checkingUpdate = useRef(false)
   const [version, setVersion] = useState('')
   const [hotkeyFailures, setHotkeyFailures] = useState<string[]>([])
+  const pendingMutations = useRef(0)
+  const aiHasDraft = useRef(false)
+  const editorOpen = useRef(false)
+  editorOpen.current = !!(editing || profileOpen || settingsOpen || confirmRemove || versionOpen)
+  const protectAiDraft = useCallback((protectedDraft: boolean) => {
+    aiHasDraft.current = protectedDraft
+  }, [])
+
+  // 托盘关闭时保留打开的编辑面板、未保存的草稿和进行中的保存操作。
+  useEffect(() => {
+    const off = listen<number>('settings:release-requested', ({ payload }) => {
+      if (editorOpen.current || aiHasDraft.current || pendingMutations.current || document.querySelector('dialog[open]')) {
+        return
+      }
+      void api.releaseSettings(payload).catch((error) => console.error('释放设置页面失败', error))
+    })
+    return () => void off.then((unlisten) => unlisten())
+  }, [])
 
   const [paneW, setPaneW] = useState(() => Number(localStorage.getItem('paneW')) || 400)
 
@@ -176,22 +194,31 @@ export function App() {
 
   const shown = active.gestures
 
-  const guard = async (fn: () => Promise<void>) => {
+  const trackMutation = async (fn: () => Promise<void>) => {
+    pendingMutations.current += 1
+    try {
+      await fn()
+    } finally {
+      pendingMutations.current -= 1
+    }
+  }
+
+  const guard = async (fn: () => Promise<void>) => trackMutation(async () => {
     try {
       await fn()
       await reload()
     } catch (e) {
       flash(String(e))
     }
-  }
+  })
 
   /** 失败时把后端的错误抛回编辑面板，由面板内联显示 */
-  const saveGesture = async (gesture: Gesture) => {
+  const saveGesture = (gesture: Gesture) => trackMutation(async () => {
     await api.upsertGesture(active.id, gesture)
     setEditing({ gesture, isNew: false })
     flash(t('saved'))
     await reload().catch((e) => flash(String(e)))
-  }
+  })
 
   const openDocs = () => void openExternal(DOCS_URL).catch((e) => flash(String(e)))
 
@@ -210,11 +237,11 @@ export function App() {
     })
 
   /** AI 页保存：只改 settings.ai 的指定字段，失败时抛回由页面内联显示 */
-  const saveAi = async (patch: Partial<AiSettings>) => {
+  const saveAi = (patch: Partial<AiSettings>) => trackMutation(async () => {
     await api.saveSettings({ ...config.settings, ai: { ...config.settings.ai, ...patch } })
     await reload()
     flash(t('saved'))
-  }
+  })
 
   /** 为 AI 动作新建一条手势：跳回手势页并打开新建面板 */
   const bindAiAction = (id: string) => {
@@ -292,6 +319,7 @@ export function App() {
           onSaveActions={(actions) => saveAi({ actions })}
           onSaveService={saveAi}
           onBind={bindAiAction}
+          onProtectDraft={protectAiDraft}
         />
       )}
 
