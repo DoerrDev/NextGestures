@@ -277,6 +277,11 @@ button {
   visibility: hidden;
 }
 
+/* hidden 属性优先于各组件自身的 display（如 .board 的 grid） */
+[hidden] {
+  display: none !important;
+}
+
 /* ---------- 表单 ---------- */
 label {
   display: block;
@@ -898,10 +903,20 @@ textarea {
   color: inherit;
 }
 
+.ai-delete-dialog {
+  width: min(440px, calc(100% - 48px));
+  margin: auto;
+  padding: 0;
+  color: inherit;
+  overflow-wrap: anywhere;
+}
+
+.ai-delete-dialog:not([open]),
 .version-dialog:not([open]) {
   display: none;
 }
 
+.ai-delete-dialog::backdrop,
 .version-dialog::backdrop {
   background: rgba(56, 56, 56, 0.35);
 }
@@ -1999,38 +2014,60 @@ select.chip-select option {
 }
 
 /* ---------- AI 动作页 ---------- */
-.ai-page { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: var(--spacing-24); gap: var(--spacing-16); }
-.ai-top { flex: none; display: flex; align-items: center; gap: var(--spacing-12); }
-.ai-top h2 { margin: 0; }
+.ai-page { container-type: inline-size; flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: var(--spacing-24); gap: var(--spacing-16); }
+.ai-top { flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: var(--spacing-8) var(--spacing-12); }
+.ai-top h2 { margin: 0; white-space: nowrap; }
 .ai-top .grow, .ai-foot .grow { flex: 1; }
-.ai-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 0 8px; border: 1.5px solid var(--color-charcoal-ink); border-radius: var(--radius-sm); background: var(--color-peach-blush); }
+.ai-top button, .ai-foot button { white-space: nowrap; flex: none; }
+.ai-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; line-height: 22px; padding: 0 8px; border: 1.5px solid var(--color-charcoal-ink); border-radius: var(--radius-sm); background: var(--color-peach-blush); white-space: nowrap; }
 .ai-chip.ok { background: #d9f5ef; }
 .ai-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--color-pencil-gray); }
 .ai-chip.ok .ai-dot { background: var(--color-mint-sketch); }
-.ai-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 260px 1fr; gap: var(--spacing-24); }
-.ai-list { display: flex; flex-direction: column; gap: var(--spacing-8); overflow-y: auto; min-height: 0; padding-right: 6px; }
+.ai-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(200px, 248px) minmax(0, 1fr); gap: var(--spacing-24); }
+.ai-list { display: flex; flex-direction: column; gap: var(--spacing-8); overflow-y: auto; min-height: 0; padding: 0 6px 6px 0; }
 .ai-list > * { flex-shrink: 0; }
+.ai-list .field-note { margin: 0; }
 .ai-item { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 8px 10px; background: var(--color-frost-white); border: 2px solid var(--color-charcoal-ink); border-radius: var(--radius-sm); color: var(--color-charcoal-ink); cursor: pointer; }
+.ai-item:hover:not(.on) { background: var(--color-ice-wash); }
 .ai-item.on { background: var(--color-sky-crayon); box-shadow: var(--shadow-hard-sm); }
-.ai-item.lock { border-color: var(--color-pencil-gray); color: #7d766f; cursor: default; }
-.ai-item-text { min-width: 0; display: flex; flex-direction: column; }
+.ai-item-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .ai-item-text b { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ai-item-text small { font-size: 11px; opacity: .75; }
+.ai-item-text small { font-size: 11px; opacity: .75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ai-ico { flex: none; width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; border: 2px solid var(--color-charcoal-ink); border-radius: var(--radius-sm); background: var(--color-frost-white); color: var(--color-charcoal-ink); padding: 0; }
-.ai-item.lock .ai-ico { border-color: var(--color-pencil-gray); }
 button.ai-ico { cursor: pointer; }
 button.ai-ico:hover:not(.on) { background: var(--color-ice-wash); }
 button.ai-ico.on { background: var(--color-sky-crayon); box-shadow: var(--shadow-hard-sm); }
-.ai-edit { min-height: 0; overflow-y: auto; display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: var(--spacing-24); align-content: start; padding: 0 6px 6px 0; }
+/* 编辑区：表单 + 预览；宽度不足时预览落到表单下方 */
+.ai-edit { min-height: 0; overflow-y: auto; display: grid; grid-template-columns: minmax(0, 640px) minmax(240px, 320px); gap: var(--spacing-24); align-content: start; align-items: start; padding: 0 6px 6px 0; }
 .ai-edit.empty { display: flex; align-items: center; justify-content: center; color: var(--color-pencil-gray); }
-.ai-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.ai-form { min-width: 0; padding: var(--spacing-16) clamp(12px, 3cqi, 24px); background: var(--color-frost-white); border: 2px solid var(--color-charcoal-ink); border-radius: var(--radius-sm); box-shadow: var(--shadow-hard-sm); }
+.ai-form .field-note { margin: 0 0 var(--spacing-8); }
+.ai-form .error { margin: 0 0 var(--spacing-8); }
+.ai-row { display: flex; align-items: center; justify-content: space-between; gap: var(--spacing-8); margin-bottom: 6px; }
+.ai-row label { margin: 0; }
 .ai-icons { display: flex; flex-wrap: wrap; gap: 6px; }
 .ai-icon-more { margin-top: 8px; padding: 8px; border: 1.5px dashed var(--color-charcoal-ink); display: grid; gap: 8px; max-height: 200px; overflow-y: auto; }
-.ai-search { display: flex; align-items: center; gap: 6px; }
-.ai-search input { flex: 1; }
-.ai-seg { display: inline-flex; border: 2px solid var(--color-charcoal-ink); }
-.ai-seg button { border: 0; border-radius: 0; background: var(--color-frost-white); color: var(--color-charcoal-ink); padding: 4px 14px; box-shadow: none; }
+.ai-search { display: flex; align-items: center; gap: 6px; margin: 0; text-transform: none; }
+.ai-search input { flex: 1; padding: 4px 8px; }
+.ai-seg { display: inline-flex; border: 2px solid var(--color-charcoal-ink); border-radius: var(--radius-sm); overflow: hidden; }
+.ai-seg button { border: 0; border-radius: 0; background: var(--color-frost-white); color: var(--color-charcoal-ink); padding: 6px 16px; box-shadow: none; white-space: nowrap; }
+.ai-seg button + button { border-left: 2px solid var(--color-charcoal-ink); }
 .ai-seg button.on { background: var(--color-charcoal-ink); color: #fff; }
-.ai-foot { display: flex; align-items: center; gap: var(--spacing-8); margin-top: var(--spacing-16); }
-.ai-bubble { margin: 0 0 var(--spacing-12); padding: 10px 12px; background: var(--color-frost-white); border: 2px solid var(--color-charcoal-ink); box-shadow: var(--shadow-hard-sm); font-family: var(--font-mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ai-foot { display: flex; align-items: center; flex-wrap: wrap; gap: var(--spacing-8); margin-top: var(--spacing-16); padding-top: var(--spacing-16); border-top: 1.5px dashed var(--color-pencil-gray); }
+.ai-preview { position: sticky; top: 0; min-width: 0; padding: var(--spacing-16); background: var(--color-ice-wash); border: 2px dashed var(--color-charcoal-ink); border-radius: var(--radius-sm); }
+.ai-preview .side-label { margin-bottom: 6px; }
+.ai-preview .field { margin-bottom: var(--spacing-12); }
+.ai-preview .field-note { margin: 0; }
+.ai-bubble { margin: 0 0 var(--spacing-8); padding: 10px 12px; max-height: 320px; overflow-y: auto; background: var(--color-frost-white); border: 2px solid var(--color-charcoal-ink); border-radius: var(--radius-sm); box-shadow: var(--shadow-hard-sm); font-family: var(--font-mono); font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* 按页面自身宽度（不含左侧导航栏）响应：先把预览放到表单下，再把动作列表放到编辑区上方 */
+@container (max-width: 960px) {
+  .ai-edit { grid-template-columns: minmax(0, 1fr); }
+  .ai-preview { position: static; }
+}
+@container (max-width: 680px) {
+  .ai-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: var(--spacing-16); }
+  .ai-list { max-height: 34vh; }
+}
 .tile-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-check { margin-bottom: 6px; }
+.ai-form .field-note code { font-family: var(--font-mono); font-size: 11px; }

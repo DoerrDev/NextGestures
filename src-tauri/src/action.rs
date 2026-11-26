@@ -49,7 +49,7 @@ pub fn run(app: &AppHandle, action: &Action) -> Result<()> {
             crate::recorder::spawn(app.clone());
             Ok(())
         }
-        Action::AiJyutping | Action::AiTranslate | Action::AiPolish | Action::AiCustom { .. } => {
+        Action::AiCustom { .. } => {
             let ai = app.state::<AppState>().config.read().unwrap().settings.ai.clone();
             crate::quickformater::spawn(app, action, &ai)
         }

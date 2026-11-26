@@ -27,10 +27,7 @@ export type Action =
   | { kind: 'none' }
   | { kind: 'screenshot' }
   | { kind: 'record_region' }
-  | { kind: 'ai_jyutping' }
-  | { kind: 'ai_translate' }
   | { kind: 'ai_custom'; id: string }
-  | { kind: 'ai_polish' }
   | { kind: 'command'; program: string; args: string[]; shell: boolean }
   | { kind: 'launch_app'; app_id: string; name: string }
   | { kind: 'hotkey'; keys: string[] }
@@ -102,6 +99,8 @@ export interface AiAction {
   mode: 'bubble' | 'replace'
   /** lucide 图标名（PascalCase），空表示默认 */
   icon?: string
+  /** 把回复中单独一行 <notes> 之后的内容作为说明卡片显示（替换时不粘贴） */
+  notes?: boolean
 }
 
 export interface AiSettings {
@@ -109,7 +108,8 @@ export interface AiSettings {
   base_url: string
   api_key: string
   model: string
-  show_polish_notes: boolean
+  /** 预设已写入过「我的动作」，删掉的预设不会自动补回 */
+  presets_seeded: boolean
 }
 
 export interface RecordedPayload {

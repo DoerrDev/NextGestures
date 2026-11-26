@@ -264,9 +264,7 @@ mod tests {
         for action in [
             Action::Screenshot,
             Action::RecordRegion,
-            Action::AiJyutping,
-            Action::AiTranslate,
-            Action::AiPolish,
+            Action::AiCustom { id: crate::ai_presets::TRANSLATE_ID.into() },
         ] {
             cfg.profile_mut("ps").unwrap().gestures[0].action = action;
             assert_eq!(best(&cfg, "photoshop.exe", input).unwrap().gesture.id, "ps-right");

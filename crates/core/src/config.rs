@@ -94,9 +94,7 @@ pub enum Action {
     #[serde(alias = "pin_screenshot")]
     Screenshot,
     RecordRegion,
-    AiJyutping,
-    AiTranslate,
-    AiPolish,
+    /// 「我的动作」里的 AI 动作；旧版内置的翻译 / 润色 / 粤拼在读取配置时迁移为对应预设
     AiCustom { id: String },
     /// 通过 Windows AppsFolder 打开已登记的应用
     LaunchApp { app_id: String, name: String },
@@ -152,7 +150,7 @@ impl Gesture {
 
 impl Action {
     pub fn is_ai(&self) -> bool {
-        matches!(self, Self::AiJyutping | Self::AiTranslate | Self::AiPolish | Self::AiCustom { .. })
+        matches!(self, Self::AiCustom { .. })
     }
 }
 
@@ -302,6 +300,9 @@ pub struct AiAction {
     /// lucide 图标名（PascalCase），空串表示使用默认图标
     #[serde(default)]
     pub icon: String,
+    /// 解析回复里 `<notes>` 行之后的内容，单独作为说明卡片显示（替换时不粘贴）
+    #[serde(default)]
+    pub notes: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -311,7 +312,8 @@ pub struct AiSettings {
     pub api_key: String,
     pub model: String,
     pub actions: Vec<AiAction>,
-    pub show_polish_notes: bool,
+    /// 预设已写入过「我的动作」；之后用户删掉的预设不再自动补回
+    pub presets_seeded: bool,
 }
 
 impl Default for AiSettings {
@@ -321,7 +323,7 @@ impl Default for AiSettings {
             api_key: String::new(),
             model: String::new(),
             actions: Vec::new(),
-            show_polish_notes: true,
+            presets_seeded: false,
         }
     }
 }
@@ -331,7 +333,7 @@ impl std::fmt::Debug for AiSettings {
         f.debug_struct("AiSettings")
             .field("base_url", &self.base_url)
             .field("model", &self.model)
-            .field("show_polish_notes", &self.show_polish_notes)
+            .field("actions", &self.actions.len())
             .finish_non_exhaustive()
     }
 }
@@ -355,11 +357,13 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self {
+        let mut cfg = Self {
             version: CONFIG_VERSION,
             settings: Settings::default(),
             profiles: vec![Profile::global()],
-        }
+        };
+        cfg.seed_ai_presets(true, &[]);
+        cfg
     }
 }
 
@@ -389,6 +393,7 @@ impl Config {
     /// 解析并迁移旧版字段；第二个返回值表示内容因迁移而变化，需要写回文件
     fn parse_migrating(text: &str) -> Result<(Self, bool)> {
         let mut config: toml::Table = toml::from_str(text)?;
+        let (legacy_ai, polish_notes) = migrate_legacy_ai_actions(&mut config);
         let shortcuts: Vec<LegacyShortcut> = match config.remove("shortcuts") {
             Some(value) => value.try_into().context("旧版快捷键格式错误")?,
             None => vec![],
@@ -417,11 +422,29 @@ impl Config {
         // Global 不能直通（手改配置时纠正）
         cfg.profiles.iter_mut().filter(|p| p.is_global()).for_each(|p| p.passthrough = false);
         cfg.migrate_legacy_builtins();
-        let migrated = cfg.version < CONFIG_VERSION || !shortcuts.is_empty() || !blacklist.is_empty();
+        let seeded = cfg.seed_ai_presets(polish_notes, &legacy_ai);
+        let migrated = cfg.version < CONFIG_VERSION || !shortcuts.is_empty() || !blacklist.is_empty()
+            || !legacy_ai.is_empty() || seeded;
         cfg.migrate_shortcuts(shortcuts);
         cfg.migrate_blacklist(blacklist);
         cfg.version = cfg.version.max(CONFIG_VERSION);
         Ok((cfg, migrated))
+    }
+
+    /// 首次运行把预设写入「我的动作」；`required` 是旧手势迁移后引用到的预设，缺了也要补上。
+    /// 返回配置是否有变化
+    fn seed_ai_presets(&mut self, polish_notes: bool, required: &[&str]) -> bool {
+        let ai = &mut self.settings.ai;
+        let mut changed = !ai.presets_seeded;
+        for preset in crate::ai_presets::ai_presets(polish_notes) {
+            let wanted = !ai.presets_seeded || required.contains(&preset.id.as_str());
+            if wanted && !ai.actions.iter().any(|a| a.id == preset.id) {
+                ai.actions.push(preset);
+                changed = true;
+            }
+        }
+        ai.presets_seeded = true;
+        changed
     }
 
     /// 旧版全局快捷键 → Global 配置组里只有快捷键的手势
@@ -607,6 +630,48 @@ impl Config {
     }
 }
 
+/// 旧版内置 AI 动作（ai_translate / ai_polish / ai_jyutping）→ 引用对应预设的 ai_custom。
+/// 同时取出旧的 `show_polish_notes`。返回（被引用的预设 id，润色是否附带说明）
+fn migrate_legacy_ai_actions(config: &mut toml::Table) -> (Vec<&'static str>, bool) {
+    let polish_notes = config
+        .get_mut("settings")
+        .and_then(|s| s.as_table_mut()?.get_mut("ai")?.as_table_mut()?.remove("show_polish_notes"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let mut used = Vec::new();
+    let mut rewrite = |action: &mut toml::Value| {
+        let Some(action) = action.as_table_mut() else { return };
+        let Some(id) = action.get("kind").and_then(|k| k.as_str()).and_then(crate::ai_presets::legacy_kind_to_preset)
+        else {
+            return;
+        };
+        action.insert("kind".into(), "ai_custom".into());
+        action.insert("id".into(), id.into());
+        if !used.contains(&id) {
+            used.push(id);
+        }
+    };
+    let gestures = config
+        .get_mut("profiles")
+        .and_then(|p| p.as_array_mut())
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.get_mut("gestures")?.as_array_mut())
+        .flatten();
+    for gesture in gestures {
+        if let Some(action) = gesture.get_mut("action") {
+            rewrite(action);
+        }
+    }
+    let shortcuts = config.get_mut("shortcuts").and_then(|s| s.as_array_mut()).into_iter().flatten();
+    for shortcut in shortcuts {
+        if let Some(action) = shortcut.get_mut("action") {
+            rewrite(action);
+        }
+    }
+    (used, polish_notes)
+}
+
 fn yes() -> bool {
     true
 }
@@ -629,10 +694,12 @@ fn describe_action(action: &Action) -> String {
         Action::None => "快捷键".into(),
         Action::Screenshot => "截图".into(),
         Action::RecordRegion => "区域录屏".into(),
-        Action::AiCustom { .. } => "AI 动作".into(),
-        Action::AiJyutping => "粤拼".into(),
-        Action::AiTranslate => "AI 翻译".into(),
-        Action::AiPolish => "AI 润色".into(),
+        Action::AiCustom { id } => match id.as_str() {
+            crate::ai_presets::TRANSLATE_ID => "AI 翻译".into(),
+            crate::ai_presets::POLISH_ID => "AI 润色".into(),
+            crate::ai_presets::JYUTPING_ID => "粤拼".into(),
+            _ => "AI 动作".into(),
+        },
         Action::LaunchApp { name, .. } => format!("启动 {name}"),
         Action::Command { program, .. } => format!("运行命令 {program}"),
         Action::Hotkey { keys } => {
@@ -871,19 +938,63 @@ mod tests {
         let back = Config::parse(&text).unwrap();
         assert_eq!(back.profiles.len(), 1);
         assert!(back.profiles[0].gestures.is_empty());
-        assert_eq!(back.settings.ai, AiSettings::default());
+        assert_eq!(back.settings.ai, cfg.settings.ai);
+        assert!(back.settings.ai.presets_seeded);
+        assert_eq!(back.settings.ai.actions.len(), 3);
         assert_eq!(back.settings.move_threshold, 20);
     }
 
     #[test]
-    fn polish_notes_default_on_and_can_be_disabled_persistently() {
-        let old = Config::parse("[settings.ai]\nmodel = 'custom'").unwrap();
-        assert!(old.settings.ai.show_polish_notes);
+    fn presets_are_seeded_once_and_stay_deleted() {
+        let (old, migrated) = Config::parse_migrating("[settings.ai]\nmodel = 'custom'").unwrap();
+        assert!(migrated);
+        let ids: Vec<_> = old.settings.ai.actions.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, [crate::ai_presets::TRANSLATE_ID, crate::ai_presets::POLISH_ID, crate::ai_presets::JYUTPING_ID]);
+        assert!(old.settings.ai.actions[1].notes);
+        assert_eq!(old.settings.ai.model, "custom");
+
         let mut cfg = old;
-        cfg.settings.ai.show_polish_notes = false;
-        let restored = Config::parse(&toml::to_string(&cfg).unwrap()).unwrap();
-        assert!(!restored.settings.ai.show_polish_notes);
-        assert_eq!(restored.settings.ai.model, "custom");
+        cfg.settings.ai.actions.retain(|a| a.id != crate::ai_presets::JYUTPING_ID);
+        let (restored, migrated) = Config::parse_migrating(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert!(!migrated);
+        assert_eq!(restored.settings.ai.actions.len(), 2);
+    }
+
+    #[test]
+    fn legacy_builtin_ai_gestures_migrate_to_presets() {
+        let old = r#"
+version = 2
+[settings.ai]
+show_polish_notes = false
+presets_seeded = true
+[[settings.ai.actions]]
+id = "mine"
+name = "我的"
+prompt = "{{selection}}"
+mode = "bubble"
+[[profiles]]
+id = "global"
+name = "Global"
+exe = ""
+[[profiles.gestures]]
+id = "g1"
+name = "润色"
+points = []
+times = []
+hotkey = ["ctrl", "p"]
+[profiles.gestures.action]
+kind = "ai_polish"
+"#;
+        let (cfg, migrated) = Config::parse_migrating(old).unwrap();
+        assert!(migrated);
+        assert_eq!(cfg.profiles[0].gestures[0].action, Action::AiCustom { id: crate::ai_presets::POLISH_ID.into() });
+        // 已经写入过预设：只补回被旧手势引用的润色，并沿用「关闭说明」的旧设置
+        let ids: Vec<_> = cfg.settings.ai.actions.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["mine", crate::ai_presets::POLISH_ID]);
+        let polish = &cfg.settings.ai.actions[1];
+        assert!(!polish.notes);
+        assert!(polish.prompt.contains("Do not include notes"));
+        assert!(!toml::to_string(&cfg).unwrap().contains("show_polish_notes"));
     }
 
     #[test]
@@ -983,7 +1094,7 @@ mod tests {
     #[test]
     fn explicit_ai_settings_take_precedence_over_legacy_settings() {
         let cfg = Config::parse("[settings.ai]\n[plugins.ai]\napi_key = 'old-key'").unwrap();
-        assert_eq!(cfg.settings.ai, AiSettings::default());
+        assert!(cfg.settings.ai.api_key.is_empty());
     }
 
     #[test]

@@ -18,11 +18,9 @@ use windows::core::w;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
-    Translation,
-    Yueping,
-    /// 润色结果（目标不可编辑时改为显示）
+    /// AI 动作结果（气泡显示，或替换失败时改为显示），标题为动作名
     Result,
-    /// 润色已替换后显示的修改说明
+    /// 已替换原文后显示的说明（动作开启了「显示说明」）
     Tutor,
     Info,
     Error,
@@ -45,6 +43,8 @@ const TIMER_AUTOCLOSE: usize = 2;
 struct Popup {
     hwnd: HWND,
     kind: Kind,
+    /// 自定义标题（动作名），空串时用 Kind 的默认标题
+    title: String,
     anchor: RECT,
     work: RECT,
     scale: f32,
@@ -79,6 +79,7 @@ thread_local! {
 
 pub struct Options<'a> {
     pub kind: Kind,
+    pub title: &'a str,
     pub text: &'a str,
     /// 用于预估最终尺寸（翻译模式传原文），减少流式过程中窗口跳动
     pub estimate: Option<&'a str>,
@@ -139,6 +140,7 @@ pub fn open(anchor: RECT, o: Options) {
         let mut p = Popup {
             hwnd,
             kind: o.kind,
+            title: o.title.to_owned(),
             anchor,
             work,
             scale,
@@ -516,23 +518,18 @@ impl Popup {
 
     fn status_label(&self) -> &'static str {
         match (self.kind, self.streaming, self.failed) {
-            (Kind::Translation, true, _) => "正在翻译 · Esc 取消",
-            (Kind::Yueping, true, _) => "正在标注 · Esc 取消",
             (_, true, _) => "正在处理 · Esc 取消",
             (Kind::Error, _, _) | (_, _, true) => "出错了 · Esc 关闭",
             (Kind::Result, _, _) => "可复制结果 · Esc 关闭",
             (Kind::Tutor, _, _) => "已替换原文 · Esc 关闭",
-            (Kind::Translation, _, _) => "翻译完成 · Esc 关闭",
-            (Kind::Yueping, _, _) => "标注完成 · Esc 关闭",
             _ => "Esc 关闭",
         }
     }
 
-    fn title(&self) -> &'static str {
+    fn title(&self) -> &str {
         match self.kind {
-            Kind::Translation => "翻译",
-            Kind::Yueping => "繁體 · 粵拼",
-            Kind::Result => "润色结果",
+            Kind::Result if !self.title.is_empty() => &self.title,
+            Kind::Result => "AI 结果",
             Kind::Tutor => "修改說明",
             Kind::Info => "提示",
             Kind::Error => "遇到问题",

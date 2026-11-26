@@ -1,15 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Check, Languages, PenLine, Plug, Plus, Search, TextCursorInput, Trash2, Type, X, type LucideIcon } from 'lucide-react'
+import { Check, Plug, Plus, Search, TextCursorInput, Trash2, X } from 'lucide-react'
 import type { AiAction, AiSettings, Profile } from '../api'
 import { ALL_AI_ICON_NAMES, COMMON_AI_ICONS, DEFAULT_AI_ICON, aiIcon } from './aiIcons'
 
 const SELECTION = '{{selection}}'
-
-const BUILTIN: { name: string; icon: LucideIcon }[] = [
-  { name: 'AI 翻译', icon: Languages },
-  { name: 'AI 润色', icon: PenLine },
-  { name: '粤拼', icon: Type },
-]
 
 interface Props {
   saved: AiSettings
@@ -49,7 +43,7 @@ function IconPicker({ value, onChange }: { value: string; onChange: (icon: strin
       {more && (
         <div className="ai-icon-more">
           <label className="ai-search"><Search size={14} />
-            <input value={q} placeholder="搜索 lucide 图标，如 mail" onChange={(e) => setQ(e.target.value)} />
+            <input type="text" value={q} placeholder="搜索图标，如 Mail" onChange={(e) => setQ(e.target.value)} />
           </label>
           <div className="ai-icons">{results.map(cell)}</div>
         </div>
@@ -67,7 +61,6 @@ function ServiceDialog({ saved, onSave, onClose }: {
     base_url: saved.base_url,
     api_key: saved.api_key,
     model: saved.model,
-    show_polish_notes: saved.show_polish_notes,
   })
   const [error, setError] = useState('')
   const submit = async () => {
@@ -93,13 +86,8 @@ function ServiceDialog({ saved, onSave, onClose }: {
             <input id="ai-api-key" type="password" value={s.api_key} autoComplete="off"
               onChange={(e) => setS({ ...s, api_key: e.target.value })} /></div>
           <div className="field"><label htmlFor="ai-model">模型</label>
-            <input id="ai-model" value={s.model} spellCheck={false}
+            <input id="ai-model" type="text" value={s.model} spellCheck={false}
               onChange={(e) => setS({ ...s, model: e.target.value })} /></div>
-          <label className="check field">
-            <input type="checkbox" checked={s.show_polish_notes}
-              onChange={(e) => setS({ ...s, show_polish_notes: e.target.checked })} />
-            显示英语优化提示
-          </label>
           <p className="field-note">触发 AI 动作时，选中文字将发送到这里配置的服务。</p>
           {error && <p className="error">{error}</p>}
         </div>
@@ -117,7 +105,7 @@ export function AiPage({ saved, profiles, onSaveActions, onSaveService, onBind }
   const [list, setList] = useState<AiAction[]>(saved.actions ?? [])
   const [selected, select] = useState(saved.actions?.[0]?.id ?? '')
   const [sample, setSample] = useState('报价单今天发我一下。')
-  const [removing, setRemoving] = useState(false)
+  const deleteDialog = useRef<HTMLDialogElement>(null)
   const [serviceOpen, setServiceOpen] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -144,9 +132,8 @@ export function AiPage({ saved, profiles, onSaveActions, onSaveService, onBind }
 
   const add = () => {
     const id = crypto.randomUUID()
-    setList([...list, { id, name: '', prompt: SELECTION, mode: 'bubble', icon: '' }])
+    setList([...list, { id, name: '', prompt: SELECTION, mode: 'bubble', icon: '', notes: false }])
     select(id)
-    setRemoving(false)
     setError('')
   }
   const insert = () => {
@@ -199,13 +186,13 @@ export function AiPage({ saved, profiles, onSaveActions, onSaveService, onBind }
       <div className="ai-body">
         <aside className="ai-list">
           <div className="side-label">我的动作</div>
-          {list.length === 0 && <p className="field-note">还没有自定义动作，点右上角「新增动作」。</p>}
+          {list.length === 0 && <p className="field-note">还没有动作，点右上角「新增动作」。</p>}
           {list.map((a) => {
             const Icon = aiIcon(a.icon)
             const n = countBindings(a.id).length
             return (
               <button key={a.id} type="button" className={a.id === action?.id ? 'ai-item on' : 'ai-item'}
-                onClick={() => { select(a.id); setRemoving(false); setError('') }}>
+                onClick={() => { select(a.id); setError('') }}>
                 <span className="ai-ico"><Icon size={18} strokeWidth={2} /></span>
                 <span className="ai-item-text">
                   <b>{a.name || '新动作'}</b>
@@ -214,20 +201,13 @@ export function AiPage({ saved, profiles, onSaveActions, onSaveService, onBind }
               </button>
             )
           })}
-          <div className="side-label">内置</div>
-          {BUILTIN.map(({ name, icon: Icon }) => (
-            <div key={name} className="ai-item lock">
-              <span className="ai-ico"><Icon size={18} strokeWidth={2} /></span>
-              <span className="ai-item-text"><b>{name}</b><small>内置</small></span>
-            </div>
-          ))}
         </aside>
 
         {action ? (
           <section className="ai-edit">
             <div className="ai-form">
               <div className="field"><label htmlFor="ai-name">名称</label>
-                <input id="ai-name" value={action.name} maxLength={80} autoFocus={!action.name}
+                <input id="ai-name" type="text" value={action.name} maxLength={80} autoFocus={!action.name}
                   onChange={(e) => update({ name: e.target.value })} /></div>
               <div className="field"><label>图标</label>
                 <IconPicker value={action.icon ?? ''} onChange={(icon) => update({ icon })} /></div>
@@ -248,20 +228,17 @@ export function AiPage({ saved, profiles, onSaveActions, onSaveService, onBind }
                     </button>
                   ))}
                 </div></div>
+              <div className="field">
+                <label className="check ai-check">
+                  <input type="checkbox" checked={!!action.notes} onChange={(e) => update({ notes: e.target.checked })} />
+                  单独显示说明
+                </label>
+                <p className="field-note">回复中单独一行 <code>&lt;notes&gt;</code> 之后的内容作为说明卡片显示；替换选中文字时只粘贴它之前的正文。需要在 Prompt 里要求 AI 按此格式输出。</p>
+              </div>
               <p className="field-note">{bindings.length ? '已绑定手势：' + bindings.join('、') : '尚未绑定手势'}</p>
               {error && <p className="error">{error}</p>}
-              {removing && (
-                <p className="field-note">删除「{action.name || '新动作'}」？保存后，相关手势将解除绑定并停用。{' '}
-                  <button type="button" className="btn-link" onClick={() => {
-                    const rest = list.filter((a) => a.id !== action.id)
-                    setList(rest)
-                    select(rest[0]?.id ?? '')
-                    setRemoving(false)
-                  }}>确认删除</button>{' '}
-                  <button type="button" className="btn-link" onClick={() => setRemoving(false)}>取消</button></p>
-              )}
               <div className="ai-foot">
-                <button type="button" className="btn-outline" onClick={() => setRemoving(true)}><Trash2 size={16} />删除</button>
+                <button type="button" className="btn-outline" disabled={busy} onClick={() => deleteDialog.current?.showModal()}><Trash2 size={16} />删除</button>
                 <span className="grow" />
                 <button type="button" className="btn-outline" disabled={busy} onClick={() => void save(true)}>保存并绑定手势</button>
                 <button type="button" className="btn-primary" disabled={busy || !dirty} onClick={() => void save()}>
@@ -272,17 +249,40 @@ export function AiPage({ saved, profiles, onSaveActions, onSaveService, onBind }
             <div className="ai-preview">
               <div className="side-label">实时预览</div>
               <div className="field"><label htmlFor="ai-sample">示例选文</label>
-                <input id="ai-sample" value={sample} onChange={(e) => setSample(e.target.value)} /></div>
+                <input id="ai-sample" type="text" value={sample} onChange={(e) => setSample(e.target.value)} /></div>
               <div className="side-label">最终发送的 Prompt</div>
               <pre className="ai-bubble">{action.prompt.split(SELECTION).join(sample)}</pre>
-              <p className="field-note">{action.mode === 'replace' ? '结果将替换选中文字' : '结果将以气泡显示'}</p>
+              <p className="field-note">
+                {action.mode === 'replace' ? '结果将替换选中文字' : '结果将以气泡显示'}
+                {action.notes ? '，说明单独显示' : ''}
+              </p>
             </div>
           </section>
         ) : (
-          <section className="ai-edit empty"><p>选择左侧动作，或新增一个自定义 AI 动作。</p></section>
+          <section className="ai-edit empty"><p>选择左侧动作，或新增一个 AI 动作。</p>
+            {dirty && <button type="button" className="btn-primary" disabled={busy} onClick={() => void save()}><Check size={16} />保存</button>}
+            {error && <p className="error">{error}</p>}
+          </section>
         )}
       </div>
 
+      {action && <dialog ref={deleteDialog} className="dialog ai-delete-dialog" aria-labelledby="delete-action-title" aria-describedby="delete-action-description">
+        <div className="dialog-head"><h2 id="delete-action-title">删除 AI 动作</h2></div>
+        <div className="dialog-body" id="delete-action-description">
+          确认删除「<strong>{action.name || '新动作'}</strong>」？删除将在保存后生效。
+          {bindings.length > 0 && <p>绑定此动作的 {bindings.length} 个手势将解除绑定并停用。</p>}
+        </div>
+        <div className="dialog-foot">
+          <button type="button" className="btn-outline" autoFocus onClick={() => deleteDialog.current?.close()}>取消</button>
+          <button type="button" className="btn-primary danger" onClick={() => {
+            deleteDialog.current?.close()
+            const rest = list.filter((a) => a.id !== action.id)
+            setList(rest)
+            select(rest[0]?.id ?? '')
+            setError('')
+          }}><Trash2 size={16} />确认删除</button>
+        </div>
+      </dialog>}
       {serviceOpen && <ServiceDialog saved={saved} onSave={onSaveService} onClose={() => setServiceOpen(false)} />}
     </div>
   )

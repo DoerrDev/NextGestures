@@ -1,3 +1,4 @@
+pub mod ai_presets;
 pub mod config;
 pub mod matcher;
 pub mod recognizer;

@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::io::{BufRead, BufReader, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -18,51 +17,25 @@ mod selection;
 const RESPONSE_LIMIT: u64 = 2 * 1024 * 1024;
 static IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Mode {
-    Polish,
-    Translate,
-    Jyutping,
-    CustomBubble(usize),
-    CustomReplace(usize),
+/// 一次 AI 动作的执行参数，指向 `AiSettings::actions` 里的某一项
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Mode {
+    index: usize,
+    /// 结果替换选中文字（否则以气泡显示）
+    replace: bool,
+    /// 把回复里 `<notes>` 之后的内容单独作为说明显示
+    notes: bool,
 }
 
 impl Mode {
     fn for_action(action: &Action, ai: &AiSettings) -> Result<Self> {
-        match action {
-            Action::AiPolish => Ok(Self::Polish),
-            Action::AiTranslate => Ok(Self::Translate),
-            Action::AiJyutping => Ok(Self::Jyutping),
-            Action::AiCustom { id } => {
-                let (index, action) = ai.actions.iter().enumerate().find(|(_, a)| a.id == *id).context("AI 动作已删除")?;
-                Ok(match action.mode {
-                    gesture_core::ResultMode::Bubble => Self::CustomBubble(index),
-                    gesture_core::ResultMode::Replace => Self::CustomReplace(index),
-                })
-            }
-            _ => bail!("动作类型错误"),
-        }
-    }
-
-    fn prompt(self, show_polish_notes: bool) -> Cow<'static, str> {
-        match self {
-            Self::Polish => {
-                let prompt = include_str!("quickformater/polish.txt");
-                if show_polish_notes {
-                    format!(
-                        "{prompt}\n{}",
-                        include_str!("quickformater/polish_notes.txt")
-                    )
-                    .into()
-                } else {
-                    format!("{prompt}\nOutput only the corrected text. Do not include notes.")
-                        .into()
-                }
-            }
-            Self::CustomBubble(_) | Self::CustomReplace(_) => unreachable!("custom actions use a user template"),
-            Self::Translate => include_str!("quickformater/translate.txt").into(),
-            Self::Jyutping => include_str!("quickformater/yueping.txt").into(),
-        }
+        let Action::AiCustom { id } = action else { bail!("动作类型错误") };
+        let (index, action) = ai.actions.iter().enumerate().find(|(_, a)| a.id == *id).context("AI 动作已删除")?;
+        Ok(Self {
+            index,
+            replace: action.mode == gesture_core::ResultMode::Replace,
+            notes: action.notes,
+        })
     }
 }
 
@@ -109,18 +82,10 @@ fn request(
         client = client.no_proxy();
     }
     let client = client.build()?;
-    let messages = match mode {
-        Mode::CustomBubble(i) | Mode::CustomReplace(i) => {
-            let template = &config.actions[i].prompt;
-            let count = template.matches("{{selection}}").count();
-            ensure!(count > 0 && template.len().saturating_add(source.len().saturating_mul(count)) <= 2 * 1024 * 1024, "请检查 Prompt 占位符或缩短选文");
-            json!([{"role":"user", "content":template.replace("{{selection}}", source)}])
-        }
-        _ => json!([
-            {"role": "system", "content": mode.prompt(config.show_polish_notes).trim()},
-            {"role": "user", "content": format!("<text>\n{source}\n</text>")},
-        ]),
-    };
+    let template = &config.actions[mode.index].prompt;
+    let count = template.matches("{{selection}}").count();
+    ensure!(count > 0 && template.len().saturating_add(source.len().saturating_mul(count)) <= 2 * 1024 * 1024, "请检查 Prompt 占位符或缩短选文");
+    let messages = json!([{"role":"user", "content":template.replace("{{selection}}", source)}]);
     let body = json!({
         "model": config.model.trim(),
         "stream": true,
@@ -218,7 +183,8 @@ fn parse_response(
     Ok(text)
 }
 
-fn split_polish_notes(output: &str) -> (&str, &str) {
+/// 以单独一行 `<notes>` 为界，拆成（正文，说明）
+fn split_notes(output: &str) -> (&str, &str) {
     let mut offset = 0;
     for line in output.split_inclusive('\n') {
         if line.trim() == "<notes>" {
@@ -313,13 +279,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn polish_prompt_respects_notes_setting() {
-        assert!(Mode::Polish.prompt(true).contains("Simplified Chinese"));
-        assert!(Mode::Polish.prompt(false).contains("Do not include notes"));
-        assert!(!Mode::Polish.prompt(false).contains("<notes>"));
-    }
-
-    #[test]
     fn accepts_stream_and_json() {
         let stream = b"data: {\"choices\":[{\"delta\":{\"content\":\"hello \"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"world\"}}]}\n\ndata: [DONE]\n";
         assert_eq!(
@@ -366,20 +325,21 @@ mod tests {
         use std::io::Write;
         use std::net::TcpListener;
 
-        for (action, prompt_fragment, answer) in [
-            (Action::AiCustom { id: "fixture".into() }, "前選中文字后", "OK"),
-            (Action::AiPolish, "English writing tutor", "Hello."),
-            (Action::AiTranslate, "professional translator", "你好。"),
-            (
-                Action::AiJyutping,
-                "standard Hong Kong Cantonese pronunciation",
-                "學(hok6)",
-            ),
+        use gesture_core::ai_presets::{self, JYUTPING_ID, POLISH_ID, TRANSLATE_ID};
+
+        for (id, prompt_fragment, answer) in [
+            ("fixture", "前選中文字后", "OK"),
+            (POLISH_ID, "English writing tutor", "Hello."),
+            (TRANSLATE_ID, "professional translator", "你好。"),
+            (JYUTPING_ID, "standard Hong Kong Cantonese pronunciation", "學(hok6)"),
         ] {
+            let action = Action::AiCustom { id: id.into() };
             let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let mut actions = vec![gesture_core::AiAction { id: "fixture".into(), name: "测试".into(), prompt: "前{{selection}}后".into(), mode: gesture_core::ResultMode::Bubble, icon: String::new(), notes: false }];
+            actions.extend(ai_presets::ai_presets(true));
             let config = AiSettings {
                 base_url: format!("http://{}/v1", listener.local_addr().unwrap()),
-                actions: vec![gesture_core::AiAction { id: "fixture".into(), name: "测试".into(), prompt: "前{{selection}}后".into(), mode: gesture_core::ResultMode::Bubble, icon: String::new() }],
+                actions,
                 model: "fixture-model".into(),
                 api_key: "fixture-key".into(),
                 ..Default::default()
@@ -421,10 +381,11 @@ mod tests {
                         .unwrap()
                         .contains(prompt_fragment)
                 );
+                assert_eq!(body["messages"].as_array().unwrap().len(), 1);
                 if answer == "OK" {
                     assert_eq!(body["messages"], json!([{"role":"user","content":"前選中文字后"}]));
                 } else {
-                    assert_eq!(body["messages"][1]["content"], "<text>\n選中文字\n</text>");
+                    assert!(body["messages"][0]["content"].as_str().unwrap().ends_with("<text>\n選中文字\n</text>"));
                 }
                 let body = json!({"choices": [{"message": {"content": answer}}]}).to_string();
                 write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();

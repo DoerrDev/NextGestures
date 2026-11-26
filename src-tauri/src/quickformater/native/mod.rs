@@ -42,11 +42,13 @@ enum Completion {
     Silent,
 }
 
-fn card(anchor: RECT, kind: Kind, text: &str, estimate: Option<&str>, auto_close_ms: u32) {
+/// `title` 为空时用 Kind 自带的标题（提示 / 遇到问题…）
+fn card(anchor: RECT, kind: Kind, title: &str, text: &str, estimate: Option<&str>, auto_close_ms: u32) {
     popup::open(
         anchor,
         Options {
             kind,
+            title,
             text,
             estimate,
             streaming: estimate.is_some(),
@@ -56,50 +58,31 @@ fn card(anchor: RECT, kind: Kind, text: &str, estimate: Option<&str>, auto_close
     );
 }
 
+/// 处理 AI 回复：开启说明时拆出 `<notes>`；替换模式先尝试粘贴正文，粘贴不了再改为卡片显示
 fn complete(
     mode: Mode,
-    show_polish_notes: bool,
     source: &str,
     output: &str,
     replace: impl FnOnce(&str) -> bool,
 ) -> Result<Completion> {
-    let kind = if mode == Mode::Jyutping {
-        Kind::Yueping
-    } else if matches!(mode, Mode::CustomBubble(_) | Mode::CustomReplace(_)) {
-        Kind::Result
-    } else {
-        Kind::Translation
-    };
-    if matches!(mode, Mode::CustomBubble(_) | Mode::CustomReplace(_)) {
-        ensure!(!output.trim().is_empty(), "AI 返回了空内容");
-        if matches!(mode, Mode::CustomReplace(_)) && (output == source || replace(output)) {
-            return Ok(Completion::Silent);
-        }
-        return Ok(Completion::Card(Kind::Result, output.to_owned(), 0));
-    }
-    if mode != Mode::Polish {
-        let text = clean_output(source, output);
-        ensure!(!text.trim().is_empty(), "AI 返回了空内容");
-        return Ok(Completion::Card(kind, text, 0));
-    }
-
-    let (body, notes) = super::split_polish_notes(output);
-    let notes = if show_polish_notes { notes } else { "" };
+    let (body, notes) = if mode.notes { super::split_notes(output) } else { (output, "") };
     let text = clean_output(source, body);
     ensure!(!text.trim().is_empty(), "AI 返回了空内容");
-    if text == source {
-        return Ok(if show_polish_notes {
-            Completion::Card(Kind::Info, "原文已经很自然，无需修改 👍".into(), 2500)
-        } else {
-            Completion::Silent
-        });
-    }
-    if replace(&text) {
-        return Ok(if notes.is_empty() {
-            Completion::Silent
-        } else {
-            Completion::Card(Kind::Tutor, notes.to_owned(), 0)
-        });
+    if mode.replace {
+        if text == source {
+            return Ok(if mode.notes {
+                Completion::Card(Kind::Info, "原文已经很自然，无需修改 👍".into(), 2500)
+            } else {
+                Completion::Silent
+            });
+        }
+        if replace(&text) {
+            return Ok(if notes.is_empty() {
+                Completion::Silent
+            } else {
+                Completion::Card(Kind::Tutor, notes.to_owned(), 0)
+            });
+        }
     }
     let mut result = text.trim().to_owned();
     if !notes.is_empty() {
@@ -139,7 +122,9 @@ pub(super) fn run(
                 let _ = send.send(rect);
             }
         });
-    let range = matches!(mode, Mode::CustomReplace(_)).then(|| target.writable_range()).flatten();
+    let range = mode.replace.then(|| target.writable_range()).flatten();
+    // 弹窗标题直接用动作名
+    let title = config.actions[mode.index].name.trim().to_owned();
     let captured = selection::capture(owner, target);
     let anchor = receive
         .recv_timeout(Duration::from_millis(200))
@@ -172,17 +157,16 @@ pub(super) fn run(
             };
             let result = request(&config, url, mode, &worker_source, |delta| {
                 ensure!(!worker_cancelled.load(Ordering::Acquire), "请求已取消");
-                if !matches!(mode, Mode::Polish | Mode::CustomReplace(_)) && !delta.is_empty() {
+                if !mode.replace && !delta.is_empty() {
                     post(Update::Delta(delta.to_owned()));
                 }
                 Ok(())
             })
             .and_then(|output| {
                 ensure!(!worker_cancelled.load(Ordering::Acquire), "请求已取消");
-                let active = || !worker_cancelled.load(Ordering::Acquire) && (!matches!(mode, Mode::CustomReplace(_)) || range.is_some() && range == target.writable_range());
+                let active = || !worker_cancelled.load(Ordering::Acquire) && (!mode.replace || range.is_some() && range == target.writable_range());
                 complete(
                     mode,
-                    config.show_polish_notes,
                     &worker_source,
                     &output,
                     |text| {
@@ -195,20 +179,13 @@ pub(super) fn run(
             post(Update::Done(result));
         });
 
-    let kind = if mode == Mode::Jyutping {
-        Kind::Yueping
-    } else if matches!(mode, Mode::CustomBubble(_) | Mode::CustomReplace(_)) {
-        Kind::Result
-    } else {
-        Kind::Translation
-    };
     if let Err(error) = worker {
         spinner::hide();
-        card(anchor, Kind::Error, &error.to_string(), None, 0);
+        card(anchor, Kind::Error, "", &error.to_string(), None, 0);
     }
     let mut pending = true;
     message_loop(|message| match message {
-        WM_APP_OUTSIDE if pending && matches!(mode, Mode::CustomReplace(_)) => true,
+        WM_APP_OUTSIDE if pending && mode.replace => true,
         WM_APP_ESC | WM_APP_OUTSIDE => false,
         WM_APP_UPDATE => {
             let mut delta = String::new();
@@ -223,7 +200,7 @@ pub(super) fn run(
             if !delta.is_empty() && !matches!(&completion, Some(Ok(_))) {
                 if !popup::is_open() {
                     spinner::hide();
-                    card(anchor, kind, "", Some(source.as_str()), 0);
+                    card(anchor, Kind::Result, &title, "", Some(source.as_str()), 0);
                 }
                 popup::append(&delta);
             }
@@ -234,10 +211,10 @@ pub(super) fn run(
                     Ok(Completion::Silent) => return false,
                     Ok(Completion::Card(_, text, _)) if popup::is_open() => popup::finish(&text),
                     Ok(Completion::Card(kind, text, timeout)) => {
-                        card(anchor, kind, &text, None, timeout)
+                        card(anchor, kind, &title, &text, None, timeout)
                     }
                     Err(error) if popup::is_open() => popup::fail(&error.to_string()),
-                    Err(error) => card(anchor, Kind::Error, &error.to_string(), None, 0),
+                    Err(error) => card(anchor, Kind::Error, "", &error.to_string(), None, 0),
                 }
             }
             popup::is_open() || spinner::is_open()
@@ -273,7 +250,7 @@ impl Drop for ScopedHooks {
 
 fn show_notice(anchor: RECT, kind: Kind, text: &str, timeout: u32) {
     let _hooks = ScopedHooks::install(message_queue());
-    card(anchor, kind, text, None, timeout);
+    card(anchor, kind, "", text, None, timeout);
     if popup::is_open() {
         message_loop(|message| !matches!(message, WM_APP_ESC | WM_APP_OUTSIDE));
         popup::close();
@@ -300,57 +277,47 @@ fn message_loop(mut thread_message: impl FnMut(u32) -> bool) {
 mod tests {
     use super::*;
 
+    const REPLACE: Mode = Mode { index: 0, replace: true, notes: false };
+    const REPLACE_NOTES: Mode = Mode { index: 0, replace: true, notes: true };
+    const BUBBLE_NOTES: Mode = Mode { index: 0, replace: false, notes: true };
+
     #[test]
-    fn custom_replace_preserves_literal_output_and_falls_back_to_a_card() {
+    fn replace_without_notes_preserves_literal_output_and_falls_back_to_a_card() {
         let output = "正文\n<notes>\n代码";
-        let result = complete(Mode::CustomReplace(0), true, "原文", output, |body| {
+        let result = complete(REPLACE, "原文", output, |body| {
             assert_eq!(body, output);
             false
         }).unwrap();
         assert!(matches!(result, Completion::Card(Kind::Result, text, _) if text == output));
-        assert!(matches!(complete(Mode::CustomReplace(0), false, "原文", output, |_| true).unwrap(), Completion::Silent));
+        assert!(matches!(complete(REPLACE, "原文", output, |_| true).unwrap(), Completion::Silent));
     }
 
     #[test]
-    fn polish_pastes_only_corrected_text_with_either_notes_setting() {
-        for show_notes in [true, false] {
-            let result = complete(
-                Mode::Polish,
-                show_notes,
-                "  he go",
-                "He goes\r\n<notes>\r\n主语是第三人称单数。",
-                |text| {
-                    assert_eq!(text, "  He goes");
-                    true
-                },
-            )
-            .unwrap();
-            if show_notes {
-                assert!(
-                    matches!(result, Completion::Card(Kind::Tutor, notes, 0) if notes == "主语是第三人称单数。")
-                );
-            } else {
-                assert!(matches!(result, Completion::Silent));
-            }
-        }
-    }
-
-    #[test]
-    fn polish_without_notes_keeps_copyable_fallback_but_skips_no_change_popup() {
-        let unchanged = complete(Mode::Polish, false, "Hello", "Hello", |_| {
-            panic!("unchanged text should not be pasted")
-        })
-        .unwrap();
-        assert!(matches!(unchanged, Completion::Silent));
-
-        let no_paste = complete(
-            Mode::Polish,
-            false,
-            "helo",
-            "Hello\n<notes>\n拼写",
-            |_| false,
+    fn notes_are_split_off_and_only_the_body_is_pasted() {
+        let result = complete(
+            REPLACE_NOTES,
+            "  he go",
+            "He goes\r\n<notes>\r\n主语是第三人称单数。",
+            |text| {
+                assert_eq!(text, "  He goes");
+                true
+            },
         )
         .unwrap();
-        assert!(matches!(no_paste, Completion::Card(Kind::Result, text, 0) if text == "Hello"));
+        assert!(matches!(result, Completion::Card(Kind::Tutor, notes, 0) if notes == "主语是第三人称单数。"));
+
+        let no_paste = complete(REPLACE_NOTES, "helo", "Hello\n<notes>\n拼写", |_| false).unwrap();
+        assert!(matches!(no_paste, Completion::Card(Kind::Result, text, 0) if text == "Hello\n\n拼写"));
+
+        let bubble = complete(BUBBLE_NOTES, "x", "译文\n<notes>\n说明", |_| panic!("bubble never pastes")).unwrap();
+        assert!(matches!(bubble, Completion::Card(Kind::Result, text, 0) if text == "译文\n\n说明"));
+    }
+
+    #[test]
+    fn unchanged_text_is_silent_unless_notes_are_on() {
+        let silent = complete(REPLACE, "Hello", "Hello", |_| panic!("unchanged text should not be pasted")).unwrap();
+        assert!(matches!(silent, Completion::Silent));
+        let info = complete(REPLACE_NOTES, "Hello", "Hello", |_| panic!("unchanged text should not be pasted")).unwrap();
+        assert!(matches!(info, Completion::Card(Kind::Info, _, 2500)));
     }
 }

@@ -6,12 +6,9 @@ import {
   Ellipsis,
   ExternalLink,
   Keyboard,
-  Languages,
   ListOrdered,
-  PenLine,
   Play,
   Scissors,
-  Type,
   type LucideIcon,
 } from 'lucide-react'
 import { api, type Action, type AiAction } from '../api'
@@ -41,9 +38,6 @@ const KIND_LABEL: Record<EditorKind, Key> = {
   open_url: 'actionOpenUrl',
   screenshot: 'actionScreenshot',
   record_region: 'actionRecordRegion',
-  ai_jyutping: 'actionAiJyutping',
-  ai_translate: 'actionAiTranslate',
-  ai_polish: 'actionAiPolish',
 }
 
 /** 图标网格里直接露出的常用动作，其余收在「更多」里 */
@@ -53,13 +47,10 @@ const COMMON_TILES: { kind: EditorKind; label: Key; icon: LucideIcon }[] = [
   { kind: 'launch_app', label: 'tileLaunchApp', icon: AppWindow },
   { kind: 'screenshot', label: 'tileScreenshot', icon: Scissors },
   { kind: 'record_region', label: 'tileRecordRegion', icon: Circle },
-  { kind: 'ai_translate', label: 'tileTranslate', icon: Languages },
-  { kind: 'ai_polish', label: 'tilePolish', icon: PenLine },
 ]
 
 const MORE_TILES: { kind: EditorKind; label: Key; icon: LucideIcon }[] = [
   { kind: 'key_sequence', label: 'tileKeySequence', icon: ListOrdered },
-  { kind: 'ai_jyutping', label: 'tileJyutping', icon: Type },
   { kind: 'none', label: 'tileNone', icon: CircleSlash },
 ]
 
@@ -125,9 +116,6 @@ function blank(kind: EditorKind): Action {
   switch (kind) {
     case 'screenshot':
     case 'record_region':
-    case 'ai_jyutping':
-    case 'ai_translate':
-    case 'ai_polish':
       return { kind }
     case 'launch_app':
       return { kind, app_id: '', name: '' }
@@ -143,7 +131,7 @@ function blank(kind: EditorKind): Action {
 }
 
 export function ActionEditor({ action, aiActions, onChange, onError, onRecordingChange, recordDisabled = false }: Props) {
-  const isAiAction = action.kind === 'ai_jyutping' || action.kind === 'ai_translate' || action.kind === 'ai_polish'
+  const isAiAction = action.kind === 'ai_custom'
   const canTest = action.kind === 'launch_app' || action.kind === 'hotkey' || action.kind === 'open_url' || action.kind === 'command'
 
   const test = async () => {

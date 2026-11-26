@@ -182,7 +182,7 @@ export function GesturePane({
   const onReleaseOnly =
     draft.left_click ||
     edgeNoRecord ||
-    ['screenshot', 'record_region', 'ai_jyutping', 'ai_translate', 'ai_polish', 'ai_custom'].includes(draft.action.kind)
+    ['screenshot', 'record_region', 'ai_custom'].includes(draft.action.kind)
   const hotkeyBusy = hotkeySet && hotkeyFailures.includes(hotkeyLabel(hotkey))
 
   const setEdgeMode = (mode: EdgeMode) => {
