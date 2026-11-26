@@ -19,6 +19,7 @@ pub(super) const PALETTE: &str = include_str!("../../assets/lucide/palette.svg")
 pub(super) const MINUS: &str = include_str!("../../assets/lucide/minus.svg");
 pub(super) const PLUS: &str = include_str!("../../assets/lucide/plus.svg");
 pub(super) const CHECK: &str = include_str!("../../assets/lucide/check.svg");
+pub(super) const PIN: &str = include_str!("../../assets/lucide/pin.svg");
 
 pub(super) type Outline = Vec<(Vec<P>, bool)>;
 
@@ -381,7 +382,7 @@ mod tests {
     fn parses_every_embedded_icon_into_strokes_inside_the_view_box() {
         for svg in [
             SQUARE, CIRCLE, ARROW, SLASH, PENCIL, HIGHLIGHTER, GRID, TYPE, ERASER, UNDO, COPY, SAVE,
-            X, PALETTE, MINUS, PLUS, CHECK,
+            X, PALETTE, MINUS, PLUS, CHECK, PIN,
         ] {
             let outline = outline(svg);
             assert!(!outline.is_empty(), "{svg}");

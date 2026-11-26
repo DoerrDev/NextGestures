@@ -25,6 +25,12 @@ pub(super) const SAVE: u16 = 102;
 pub(super) const LESS: u16 = 103;
 pub(super) const MORE: u16 = 104;
 pub(super) const CLOSE: u16 = 105;
+/// 截图阶段：把选区贴到桌面。
+pub(super) const PIN: u16 = 106;
+/// 贴图阶段：完成编辑并收起工具栏。
+pub(super) const DONE: u16 = 107;
+/// Esc（工具栏获得焦点时由对话框导航转成 IDCANCEL）。
+pub(super) const ESCAPE: u16 = 150;
 pub(super) const RECT_TOOL: u16 = 111;
 pub(super) const LINE_TOOL: u16 = 112;
 pub(super) const PEN: u16 = 113;
@@ -42,8 +48,8 @@ pub(super) const SWATCHES: [u32; 8] = [
 const SWATCH_NAMES: [&str; 8] = ["红色", "橙色", "黄色", "绿色", "蓝色", "紫色", "黑色", "白色"];
 const ALPHA_SLOT: u16 = 0;
 const SPACER: u16 = 1;
-/// (id, 宽度, 行)
-const ITEMS: [(u16, i32, i32); 25] = [
+/// 截图阶段 (id, 宽度, 行)：标注工具 + 退出 / 贴图 / 保存 / 复制。
+const STAGING_ITEMS: &[(u16, i32, i32)] = &[
     (RECT_TOOL, 30, 0),
     (LINE_TOOL, 30, 0),
     (PEN, 30, 0),
@@ -53,9 +59,35 @@ const ITEMS: [(u16, i32, i32); 25] = [
     (ERASER, 30, 0),
     (SPACER, 8, 0),
     (UNDO, 30, 0),
-    (COPY, 30, 0),
-    (SAVE, 30, 0),
+    (SPACER, 8, 0),
     (CLOSE, 30, 0),
+    (PIN, 30, 0),
+    (SAVE, 30, 0),
+    (COPY, 30, 0),
+    (SWATCH, 26, 1),
+    (SWATCH + 1, 26, 1),
+    (SWATCH + 2, 26, 1),
+    (SWATCH + 3, 26, 1),
+    (SWATCH + 4, 26, 1),
+    (SWATCH + 5, 26, 1),
+    (SWATCH + 6, 26, 1),
+    (SWATCH + 7, 26, 1),
+    (PALETTE, 30, 1),
+];
+/// 贴图阶段：标注工具 + 保存 / 复制 / 完成，第二行带不透明度。
+const PINNED_ITEMS: &[(u16, i32, i32)] = &[
+    (RECT_TOOL, 30, 0),
+    (LINE_TOOL, 30, 0),
+    (PEN, 30, 0),
+    (MARKER, 30, 0),
+    (MOSAIC, 30, 0),
+    (TEXT, 30, 0),
+    (ERASER, 30, 0),
+    (SPACER, 8, 0),
+    (UNDO, 30, 0),
+    (SAVE, 30, 0),
+    (COPY, 30, 0),
+    (DONE, 30, 0),
     (SWATCH, 26, 1),
     (SWATCH + 1, 26, 1),
     (SWATCH + 2, 26, 1),
@@ -71,20 +103,28 @@ const ITEMS: [(u16, i32, i32); 25] = [
     (MORE, 26, 1),
 ];
 const GAP: i32 = 2;
-const WIDTH: i32 = 384;
 const HEIGHT: i32 = 74;
 
+fn items(staging: bool) -> &'static [(u16, i32, i32)] {
+    if staging { STAGING_ITEMS } else { PINNED_ITEMS }
+}
+
 /// 未缩放的按钮位置 (id, x, y, 宽)。
-fn slots() -> impl Iterator<Item = (u16, i32, i32, i32)> {
+fn slots(staging: bool) -> impl Iterator<Item = (u16, i32, i32, i32)> {
     let mut x = [8, 8];
-    ITEMS.into_iter().map(move |(id, width, row)| {
+    items(staging).iter().map(move |&(id, width, row)| {
         let left = x[row as usize];
         x[row as usize] += width + GAP;
         (id, left, 5 + row * 34, width)
     })
 }
 
-fn tip(id: u16) -> String {
+/// 未缩放的工具栏宽度：最长一行加两侧留白。
+fn width(staging: bool) -> i32 {
+    slots(staging).map(|(_, x, _, w)| x + w).max().unwrap_or(0) + 8
+}
+
+fn tip(id: u16, staging: bool) -> String {
     match id {
         RECT_TOOL => "矩形 / 椭圆  Ctrl+1（再按切换，Shift 画正形）".into(),
         LINE_TOOL => "箭头 / 直线  Ctrl+2（按住拖动，再按切换，Shift 锁定 45°）".into(),
@@ -94,9 +134,13 @@ fn tip(id: u16) -> String {
         TEXT => "文字  Ctrl+6（Enter 确定，Shift+Enter 换行）".into(),
         ERASER => "橡皮擦  E".into(),
         UNDO => "撤销  Ctrl+Z".into(),
+        COPY if staging => "复制并退出  Ctrl+C".into(),
         COPY => "复制图片  Ctrl+C".into(),
+        SAVE if staging => "保存并退出  Ctrl+S".into(),
         SAVE => "保存图片  Ctrl+S".into(),
-        CLOSE => "关闭贴图  Esc".into(),
+        CLOSE => "退出截图  Esc".into(),
+        PIN => "贴到屏幕  Ctrl+T（或贴图快捷键）".into(),
+        DONE => "完成  Esc".into(),
         PALETTE => "调色板（自定义颜色）".into(),
         LESS => "降低不透明度（滚轮也可调节）".into(),
         MORE => "提高不透明度".into(),
@@ -120,6 +164,8 @@ fn icon(id: u16, alt: bool) -> Option<&'static str> {
         COPY => icons::COPY,
         SAVE => icons::SAVE,
         CLOSE => icons::X,
+        PIN => icons::PIN,
+        DONE => icons::CHECK,
         PALETTE => icons::PALETTE,
         LESS => icons::MINUS,
         MORE => icons::PLUS,
@@ -142,6 +188,8 @@ struct Toolbar {
     alt: bool,
     color: COLORREF,
     hot: u16,
+    /// 截图阶段布局（退出 / 贴图 / 保存 / 复制）。
+    staging: bool,
 }
 impl Drop for Toolbar {
     fn drop(&mut self) {
@@ -454,10 +502,10 @@ impl Pixels {
 }
 
 /// 下方空间不足时翻到图片上方；小贴图也有完整工具栏，限制在所在屏工作区内。
-fn placement(image: RECT, work: RECT, dpi: u32) -> (RECT, f64) {
+fn placement(image: RECT, work: RECT, dpi: u32, base_width: i32) -> (RECT, f64) {
     let scale = (f64::from(dpi.max(96)) / 96.0)
-        .min(f64::from((work.right - work.left - 16).max(1)) / f64::from(WIDTH));
-    let width = scaled(WIDTH, scale).max(1);
+        .min(f64::from((work.right - work.left - 16).max(1)) / f64::from(base_width));
+    let width = scaled(base_width, scale).max(1);
     let height = scaled(HEIGHT, scale).max(1);
     let left = (image.left + (image.right - image.left - width) / 2)
         .clamp(work.left, (work.right - width).max(work.left));
@@ -479,7 +527,7 @@ fn placement(image: RECT, work: RECT, dpi: u32) -> (RECT, f64) {
     )
 }
 
-fn layout(owner: HWND) -> Result<(RECT, f64)> {
+fn layout(owner: HWND, staging: bool) -> Result<(RECT, f64)> {
     let mut image = RECT::default();
     unsafe {
         GetWindowRect(owner, &mut image)?;
@@ -505,12 +553,16 @@ fn layout(owner: HWND) -> Result<(RECT, f64)> {
         unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool(),
         "读取工具栏显示器失败"
     );
-    Ok(placement(image, info.rcWork, unsafe {
-        GetDpiForWindow(owner)
-    }))
+    Ok(placement(
+        image,
+        info.rcWork,
+        unsafe { GetDpiForWindow(owner) },
+        width(staging),
+    ))
 }
 
-pub(super) fn create(owner: HWND, alpha: u8) -> Result<()> {
+/// `staging` 选择截图阶段的按钮布局，否则为贴图阶段。
+pub(super) fn create(owner: HWND, alpha: u8, staging: bool) -> Result<()> {
     static CLASS: OnceLock<bool> = OnceLock::new();
     ensure!(
         *CLASS.get_or_init(|| unsafe {
@@ -527,7 +579,7 @@ pub(super) fn create(owner: HWND, alpha: u8) -> Result<()> {
         }),
         "注册贴图工具栏失败"
     );
-    let (rect, scale) = layout(owner)?;
+    let (rect, scale) = layout(owner, staging)?;
     let window = unsafe {
         CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_CONTROLPARENT,
@@ -546,7 +598,7 @@ pub(super) fn create(owner: HWND, alpha: u8) -> Result<()> {
     };
     let result = (|| -> Result<Toolbar> {
         let mut buttons = Vec::new();
-        for (id, x, y, width) in slots() {
+        for (id, x, y, width) in slots(staging) {
             if id == ALPHA_SLOT || id == SPACER {
                 continue;
             }
@@ -585,7 +637,7 @@ pub(super) fn create(owner: HWND, alpha: u8) -> Result<()> {
                 None,
             )?;
             for &(id, button) in &buttons {
-                let mut text = wide(&tip(id));
+                let mut text = wide(&tip(id, staging));
                 let info = TTTOOLINFOW {
                     // V2 大小同时兼容 comctl32 v5/v6。
                     cbSize: (size_of::<TTTOOLINFOW>() - size_of::<usize>()) as u32,
@@ -617,6 +669,7 @@ pub(super) fn create(owner: HWND, alpha: u8) -> Result<()> {
             alt: false,
             color: COLORREF(SWATCHES[0]),
             hot: 0,
+            staging,
         })
     })();
     match result {
@@ -633,9 +686,9 @@ pub(super) fn create(owner: HWND, alpha: u8) -> Result<()> {
 }
 
 pub(super) fn position() -> Result<()> {
-    let owner = BAR.with(|b| b.borrow().as_ref().map(|b| b.owner));
-    let Some(owner) = owner else { return Ok(()) };
-    let (rect, scale) = layout(owner)?;
+    let owner = BAR.with(|b| b.borrow().as_ref().map(|b| (b.owner, b.staging)));
+    let Some((owner, staging)) = owner else { return Ok(()) };
+    let (rect, scale) = layout(owner, staging)?;
     let state = BAR.with(|b| {
         let mut b = b.borrow_mut();
         let b = b.as_mut().unwrap();
@@ -670,7 +723,7 @@ pub(super) fn position() -> Result<()> {
             SWP_NOACTIVATE,
         )?;
         set_toolbar_rounding(state.0, rect.right - rect.left, rect.bottom - rect.top, scale, false);
-        for (id, x, y, width) in slots() {
+        for (id, x, y, width) in slots(staging) {
             if let Some((_, button)) = state.1.iter().find(|(key, _)| *key == id) {
                 SetWindowPos(
                     *button,
@@ -689,6 +742,20 @@ pub(super) fn position() -> Result<()> {
     Ok(())
 }
 
+/// 关闭工具栏（截图转为贴图时换成另一套按钮）。
+pub(super) fn destroy() {
+    let window = BAR.with(|b| b.borrow().as_ref().map(|b| b.window));
+    if let Some(window) = window {
+        unsafe {
+            let _ = DestroyWindow(window);
+        }
+    }
+    BAR.with(|b| {
+        b.borrow_mut().take();
+    });
+}
+
+/// `selected`：工具栏应当显示（截图阶段始终显示；贴图阶段需选中并按空格打开）。
 pub(super) fn set_selected(selected: bool) {
     let changed = BAR.with(|b| {
         let mut b = b.borrow_mut();
@@ -892,6 +959,10 @@ fn draw_item(item: &DRAWITEMSTRUCT) {
             (icons::CHECK, color(22, 150, 80))
         } else if id == CLOSE {
             (svg, color(200, 60, 60))
+        } else if id == DONE {
+            (svg, color(22, 150, 80))
+        } else if id == PIN {
+            (svg, color(29, 100, 210))
         } else if active {
             (svg, color(29, 100, 210))
         } else {
@@ -1002,7 +1073,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
             WM_COMMAND => {
                 let id = (wp.0 & 0xffff) as u16;
                 let id = if i32::from(id) == IDCANCEL.0 {
-                    CLOSE
+                    ESCAPE
                 } else {
                     id
                 };
@@ -1033,28 +1104,33 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
                 let dc = BeginPaint(hwnd, &mut paint);
                 let mut rect = RECT::default();
                 let _ = GetClientRect(hwnd, &mut rect);
-                let style = BAR.with(|b| b.borrow().as_ref().map(|b| (b.scale, b.font, b.alpha)));
-                paint_toolbar_surface(hwnd, dc, &rect, style.map_or(1.0, |(scale, _, _)| scale));
-                if let Some((scale, font, alpha)) = style {
+                let style = BAR.with(|b| {
+                    b.borrow().as_ref().map(|b| (b.scale, b.font, b.alpha, b.staging))
+                });
+                paint_toolbar_surface(hwnd, dc, &rect, style.map_or(1.0, |(scale, ..)| scale));
+                if let Some((scale, font, alpha, staging)) = style {
                     let previous = SelectObject(dc, HGDIOBJ(font.0));
                     SetBkMode(dc, TRANSPARENT);
                     SetTextColor(dc, color(71, 85, 105));
                     let mut text: Vec<u16> = format!("{}%", (u32::from(alpha) * 100 + 127) / 255)
                         .encode_utf16()
                         .collect();
-                    let (_, x, y, width) = slots().find(|slot| slot.0 == ALPHA_SLOT).unwrap();
-                    let mut area = RECT {
-                        left: scaled(x, scale),
-                        top: scaled(y, scale),
-                        right: scaled(x + width, scale),
-                        bottom: scaled(y + 30, scale),
-                    };
-                    DrawTextW(
-                        dc,
-                        &mut text,
-                        &mut area,
-                        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                    );
+                    if let Some((_, x, y, width)) =
+                        slots(staging).find(|slot| slot.0 == ALPHA_SLOT)
+                    {
+                        let mut area = RECT {
+                            left: scaled(x, scale),
+                            top: scaled(y, scale),
+                            right: scaled(x + width, scale),
+                            bottom: scaled(y + 30, scale),
+                        };
+                        DrawTextW(
+                            dc,
+                            &mut text,
+                            &mut area,
+                            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                        );
+                    }
                     // 两行之间的细分隔线。
                     let line = RECT {
                         left: scaled(8, scale),
@@ -1110,7 +1186,7 @@ mod tests {
             right: -20,
             bottom: 1030,
         };
-        let (bar, _) = placement(image, work, 144);
+        let (bar, _) = placement(image, work, 144, width(false));
         assert!(bar.left >= work.left && bar.right <= work.right);
         assert!(bar.bottom < image.top && bar.top >= work.top);
         let (bar, _) = placement(
@@ -1122,8 +1198,9 @@ mod tests {
             },
             work,
             192,
+            width(false),
         );
-        assert!(bar.top > 164 && bar.right - bar.left == WIDTH * 2);
+        assert!(bar.top > 164 && bar.right - bar.left == width(false) * 2);
     }
     #[test]
     #[ignore = "writes an icon preview PNG to NEXTGESTURES_ICON_PREVIEW"]
@@ -1131,7 +1208,7 @@ mod tests {
         let Ok(path) = std::env::var("NEXTGESTURES_ICON_PREVIEW") else { return };
         let ids = [
             RECT_TOOL, LINE_TOOL, PEN, MARKER, MOSAIC, TEXT, ERASER, UNDO, COPY, SAVE, CLOSE,
-            PALETTE, LESS, MORE,
+            PIN, DONE, PALETTE, LESS, MORE,
         ];
         let mut rows = Vec::new();
         for scale in [1.0f32, 1.5, 2.0] {
@@ -1187,9 +1264,21 @@ mod tests {
         encoder.write_header().unwrap().write_image_data(&rgba).unwrap();
     }
     #[test]
-    fn both_rows_fit_inside_the_toolbar_width() {
-        let right = slots().map(|(_, x, _, w)| x + w).max().unwrap();
-        assert!(right + 8 <= WIDTH, "row ends at {right}");
+    fn layouts_hold_the_core_buttons_in_order() {
+        let ids = |staging| slots(staging).map(|slot| slot.0).collect::<Vec<_>>();
+        let staging = ids(true);
+        let core: Vec<_> = staging
+            .iter()
+            .copied()
+            .filter(|id| [CLOSE, PIN, SAVE, COPY].contains(id))
+            .collect();
+        assert_eq!(core, [CLOSE, PIN, SAVE, COPY]);
+        assert!(!staging.contains(&DONE) && !staging.contains(&LESS));
+        let pinned = ids(false);
+        assert!(pinned.contains(&DONE) && pinned.contains(&ALPHA_SLOT));
+        assert!(!pinned.contains(&CLOSE) && !pinned.contains(&PIN));
+        assert!(width(false) <= 384);
+        assert!(width(true) > width(false));
     }
     #[test]
     fn swatch_disc_edges_are_anti_aliased() {

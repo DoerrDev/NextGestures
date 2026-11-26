@@ -523,7 +523,7 @@ fn lookup(
         score: m.score,
         // 右键组合存在时保留追加左键的机会，统一在右键松开时执行。
         fire_mode: if m.gesture.action.is_ai()
-            || matches!(m.gesture.action, Action::Screenshot | Action::RecordRegion)
+            || matches!(m.gesture.action, Action::Screenshot | Action::Pin | Action::RecordRegion)
             || left_click
             || matcher::requires_release(&cfg, exe, button)
         {

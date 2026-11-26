@@ -7,6 +7,7 @@ import {
   ExternalLink,
   Keyboard,
   ListOrdered,
+  Pin,
   Play,
   Scissors,
   type LucideIcon,
@@ -37,6 +38,7 @@ const KIND_LABEL: Record<EditorKind, Key> = {
   key_sequence: 'actionKeySequence',
   open_url: 'actionOpenUrl',
   screenshot: 'actionScreenshot',
+  pin: 'actionPin',
   record_region: 'actionRecordRegion',
 }
 
@@ -46,6 +48,7 @@ const COMMON_TILES: { kind: EditorKind; label: Key; icon: LucideIcon }[] = [
   { kind: 'open_url', label: 'tileOpenUrl', icon: ExternalLink },
   { kind: 'launch_app', label: 'tileLaunchApp', icon: AppWindow },
   { kind: 'screenshot', label: 'tileScreenshot', icon: Scissors },
+  { kind: 'pin', label: 'tilePin', icon: Pin },
   { kind: 'record_region', label: 'tileRecordRegion', icon: Circle },
 ]
 
@@ -115,6 +118,7 @@ function KindTiles({ action, aiActions, onPick, onPickCustom }: {
 function blank(kind: EditorKind): Action {
   switch (kind) {
     case 'screenshot':
+    case 'pin':
     case 'record_region':
       return { kind }
     case 'launch_app':
@@ -148,6 +152,9 @@ export function ActionEditor({ action, aiActions, onChange, onError, onRecording
         onPickCustom={(id) => onChange({ kind: 'ai_custom', id })} />
       {action.kind === 'screenshot' && (
         <p className="field-note">{t('screenshotActionHint')}</p>
+      )}
+      {action.kind === 'pin' && (
+        <p className="field-note">{t('pinActionHint')}</p>
       )}
       {action.kind === 'record_region' && (
         <p className="field-note">{t('recordActionHint')}</p>

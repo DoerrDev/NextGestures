@@ -47,6 +47,10 @@ pub fn run(app: &AppHandle, action: &Action) -> Result<()> {
             crate::pin::spawn(app.clone());
             Ok(())
         }
+        Action::Pin => {
+            crate::pin::spawn_paste(app.clone());
+            Ok(())
+        }
         Action::RecordRegion => {
             crate::recorder::spawn(app.clone());
             Ok(())

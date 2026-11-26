@@ -26,6 +26,7 @@ export interface KeySequenceEvent {
 export type Action =
   | { kind: 'none' }
   | { kind: 'screenshot' }
+  | { kind: 'pin' }
   | { kind: 'record_region' }
   | { kind: 'ai_custom'; id: string }
   | { kind: 'command'; program: string; args: string[]; shell: boolean }

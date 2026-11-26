@@ -1,8 +1,15 @@
 //! 物理像素截图与逐像素阴影；每张贴图独立拥有图片及消息循环。
-use anyhow::{Result, ensure};
+//!
+//! 类 Snipaste 的两个阶段：
+//! - 截图：在冻结的整屏画面上框选，选区可调整（开始标注后锁定），工具栏常驻，
+//!   退出 / 贴图 / 保存 / 复制分别对应 Esc / Ctrl+T / Ctrl+S / Ctrl+C。
+//! - 贴图：置顶的图片，可拖动、滚轮缩放；空格打开工具栏编辑，Esc 完成；
+//!   单按 Ctrl 折叠成缩略图；无工具栏时 Esc 关闭并压入历史栈，贴图键可依次恢复。
+use anyhow::{Result, bail, ensure};
 use std::cell::{Cell, RefCell};
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 use windows::Win32::Foundation::{
     COLORREF, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
 };
@@ -20,6 +27,7 @@ use windows::core::w;
 use super::pin_draw::{self as draw, Canvas, Ink, P, Shape, Tool};
 use super::pin_text;
 use super::pin_toolbar as bar;
+use super::region::{Backdrop, Frozen};
 
 #[path = "pin_ink.rs"]
 mod ink;
@@ -27,11 +35,21 @@ use ink::with_picture;
 
 pub(super) const SHADOW: i32 = 20;
 const FOLD_SIZE: i32 = 64;
+/// 单按 Ctrl：折叠成缩略图 / 恢复。
 const TOGGLE_FOLD: u16 = 151;
+/// 空格：打开 / 收起贴图工具栏。
+const TOGGLE_TOOLBAR: u16 = 152;
 const ZOOM_STEP: f64 = 1.1;
 const MAX_IMAGE_SIDE: i32 = 16384;
 const MAX_IMAGE_PIXELS: i32 = 32 * 1024 * 1024;
+const MIN_SIDE: i32 = 16;
 const ZOOM_BADGE_TIMER: usize = 8;
+const FLASH_TIMER: usize = 9;
+/// 历史栈已空时投递给每张贴图：半透明 500ms 作为提示。
+const FLASH: u32 = WM_APP + 45;
+const FLASH_MS: u32 = 500;
+/// 关闭贴图的历史栈最多保留的张数。
+const HISTORY: usize = 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Bounds {
@@ -162,9 +180,63 @@ struct Picture {
     /// 被点击选中（贴图或其工具栏/文字框处于前台）。
     selected: bool,
     ink: ink::Annotate,
+    /// 贴图阶段按空格打开了工具栏（编辑中）。
+    toolbar: bool,
+    /// 历史栈为空的提示：暂时半透明。
+    flash: bool,
+    /// 截图阶段可调整选区时，在边框上画出 8 个控制点。
+    handles: bool,
 }
 
 impl Picture {
+    fn new(pixels: Vec<u8>, width: i32, height: i32) -> Result<Self> {
+        ensure!(
+            width > 0 && height > 0 && pixels.len() == width as usize * height as usize * 4,
+            "图片像素长度错误"
+        );
+        ensure!(
+            width <= MAX_IMAGE_SIDE
+                && height <= MAX_IMAGE_SIDE
+                && i64::from(width) * i64::from(height) <= i64::from(MAX_IMAGE_PIXELS),
+            "图片过大，无法贴出"
+        );
+        let view = View {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+        let mut picture = Picture {
+            ink: ink::Annotate::new(pixels.clone(), bar::SWATCHES[0]),
+            pixels,
+            width,
+            height,
+            view,
+            folded: false,
+            surface: Surface::new(1, 1)?,
+            zoom: 1.0,
+            zoom_surface: None,
+            zoom_wheel_remainder: 0,
+            alpha: 255,
+            wheel_remainder: 0,
+            exporting: false,
+            selected: false,
+            toolbar: false,
+            flash: false,
+            handles: false,
+        };
+        picture.surface = picture.compose(view)?;
+        Ok(picture)
+    }
+
+    /// 把当前图片（含草稿、正在编辑的文字和控制点）写入已合成 DIB 的内容区。
+    pub(super) fn paint_view(&mut self) {
+        self.paint_content();
+        if self.handles {
+            paint_handles(&mut self.surface, self.ink.scale);
+        }
+    }
+
     fn png(&self) -> Result<Vec<u8>> {
         let mut rgba = self.pixels.clone();
         for pixel in rgba.chunks_exact_mut(4) {
@@ -190,6 +262,9 @@ impl Picture {
             let dst = (y + SHADOW) as usize * stride + SHADOW as usize * 4;
             bytes[dst..dst + view.width as usize * 4]
                 .copy_from_slice(&self.pixels[src..src + view.width as usize * 4]);
+        }
+        if self.handles {
+            paint_handles(&mut surface, self.ink.scale);
         }
         Ok(surface)
     }
@@ -220,6 +295,35 @@ fn paint_frame(surface: &mut Surface, selected: bool) {
         for x in columns.into_iter().flatten() {
             let i = y as usize * stride + x as usize * 4;
             bytes[i..i + 4].copy_from_slice(&edge_pixel(x, y, width, height, selected));
+        }
+    }
+}
+
+/// 截图选区的 8 个控制点：白底蓝边的小方块，中心落在图片边缘上。
+fn paint_handles(surface: &mut Surface, scale: f32) {
+    let (width, height) = (surface.width - 2 * SHADOW, surface.height - 2 * SHADOW);
+    let half = (3.5 * scale.max(1.0)).round() as i32;
+    let stride = surface.width as usize * 4;
+    let (surface_width, surface_height) = (surface.width, surface.height);
+    let bytes = surface.bytes_mut();
+    let xs = [SHADOW, SHADOW + width / 2, SHADOW + width - 1];
+    let ys = [SHADOW, SHADOW + height / 2, SHADOW + height - 1];
+    for (row, &cy) in ys.iter().enumerate() {
+        for (column, &cx) in xs.iter().enumerate() {
+            if row == 1 && column == 1 {
+                continue;
+            }
+            for y in (cy - half).max(0)..=(cy + half).min(surface_height - 1) {
+                for x in (cx - half).max(0)..=(cx + half).min(surface_width - 1) {
+                    let border = (x - cx).abs() == half || (y - cy).abs() == half;
+                    let i = y as usize * stride + x as usize * 4;
+                    bytes[i..i + 4].copy_from_slice(if border {
+                        &[235, 152, 52, 255]
+                    } else {
+                        &[255, 255, 255, 255]
+                    });
+                }
+            }
         }
     }
 }
@@ -306,12 +410,51 @@ fn edge_pixel(x: i32, y: i32, width: i32, height: i32, selected: bool) -> [u8; 4
     ]
 }
 
+/// 截图阶段：冻结画面（调整选区时重新裁剪）和暗色背景窗口。
+struct Stage {
+    frozen: Rc<Frozen>,
+    backdrop: Backdrop,
+}
+
+/// 拖动控制点调整选区：命中码、起点光标和起始选区（桌面坐标）。
+#[derive(Clone, Copy)]
+struct Resize {
+    edge: u32,
+    origin: POINT,
+    rect: RECT,
+}
+
+/// 关闭后压入历史栈的贴图，可被贴图键原样恢复（标注仍可撤销重编辑）。
+struct Closed {
+    base: Vec<u8>,
+    pixels: Vec<u8>,
+    shapes: Vec<Shape>,
+    width: i32,
+    height: i32,
+    origin: POINT,
+    zoom: f64,
+    alpha: u8,
+}
+
 thread_local! {
     static PICTURE: RefCell<Option<Picture>> = const { RefCell::new(None) };
+    static STAGE: RefCell<Option<Stage>> = const { RefCell::new(None) };
     static DRAG_OFFSET: Cell<Option<POINT>> = const { Cell::new(None) };
+    static RESIZE: Cell<Option<Resize>> = const { Cell::new(None) };
     static ZOOM_BADGE: Cell<Option<(HWND, POINT)>> = const { Cell::new(None) };
+    /// 按下 Ctrl 后尚未按其他键 / 鼠标，松开时视为单按。
+    static CTRL_TAP: Cell<bool> = const { Cell::new(false) };
 }
 static COUNT: AtomicUsize = AtomicUsize::new(0);
+/// 截图阶段的窗口（0 表示没有）；贴图键在截图时直接贴出选区。
+static STAGING: AtomicUsize = AtomicUsize::new(0);
+/// 上次贴出的剪贴板序号；剪贴板没变时贴图键改为恢复历史。
+static LAST_SEQUENCE: AtomicU32 = AtomicU32::new(0);
+static CLOSED: Mutex<Vec<Closed>> = Mutex::new(Vec::new());
+
+fn staging() -> bool {
+    STAGE.with(|stage| stage.borrow().is_some())
+}
 struct Slot;
 impl Drop for Slot {
     fn drop(&mut self) {
@@ -359,31 +502,7 @@ fn capture(b: Bounds) -> Result<Picture> {
     for pixel in pixels.chunks_exact_mut(4) {
         pixel[3] = 255;
     }
-    let view = View {
-        x: 0,
-        y: 0,
-        width: b.width,
-        height: b.height,
-    };
-    let mut picture = Picture {
-        pixels,
-        width: b.width,
-        height: b.height,
-        view,
-        folded: false,
-        surface: raw,
-        zoom: 1.0,
-        zoom_surface: None,
-        zoom_wheel_remainder: 0,
-        alpha: 255,
-        wheel_remainder: 0,
-        exporting: false,
-        selected: false,
-        ink: ink::Annotate::default(),
-    };
-    picture.ink = ink::Annotate::new(picture.pixels.clone(), bar::SWATCHES[0]);
-    picture.surface = picture.compose(view)?;
-    Ok(picture)
+    Picture::new(pixels, b.width, b.height)
 }
 
 fn render(hwnd: HWND, position: Option<POINT>) -> Result<()> {
@@ -398,7 +517,7 @@ fn render(hwnd: HWND, position: Option<POINT>) -> Result<()> {
                 cx: surface.width,
                 cy: surface.height,
             },
-            p.alpha,
+            if p.flash { p.alpha / 2 } else { p.alpha },
         )
     });
     unsafe {
@@ -489,7 +608,8 @@ fn zoom_size(width: i32, height: i32, zoom: f64) -> (i32, i32) {
 }
 
 fn zoom_picture(hwnd: HWND, delta: i32, cursor: POINT) -> Result<()> {
-    if DRAG_OFFSET.get().is_some() {
+    // 截图阶段图片与屏幕一一对应，不缩放。
+    if DRAG_OFFSET.get().is_some() || staging() {
         return Ok(());
     }
     let mut rect = RECT::default();
@@ -670,25 +790,160 @@ unsafe extern "system" fn zoom_badge_procedure(
     }
 }
 
-fn hit_test(hwnd: HWND, point: POINT) -> LRESULT {
-    let mut rect = RECT::default();
-    if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
-        return LRESULT(HTTRANSPARENT as isize);
+/// 截图阶段尚未标注时选区可调整（类 Snipaste：开始标注后锁定）。
+fn adjustable() -> bool {
+    staging() && with_picture(|p| !p.ink.marked())
+}
+
+/// 选区边缘的命中码（左 / 右 / 上 / 下及四角），不在边缘附近时为 None。
+fn edge_at(image: RECT, point: POINT, grip: i32) -> Option<u32> {
+    let reach = |value: i32, low: i32, high: i32| (low - grip..=high + grip).contains(&value);
+    if !reach(point.x, image.left, image.right) || !reach(point.y, image.top, image.bottom) {
+        return None;
     }
-    let (width, height, drawing) = PICTURE.with(|p| {
-        let p = p.borrow();
-        let p = p.as_ref().unwrap();
-        let (width, height) = p.display_size();
-        (width, height, p.ink.tool.is_some() && !p.folded)
-    });
-    if (rect.left + SHADOW..rect.left + SHADOW + width).contains(&point.x)
-        && (rect.top + SHADOW..rect.top + SHADOW + height).contains(&point.y)
+    let near = |value: i32, edge: i32| (value - edge).abs() <= grip;
+    let (left, right) = (near(point.x, image.left), near(point.x, image.right));
+    let (top, bottom) = (near(point.y, image.top), near(point.y, image.bottom));
+    Some(match (left, right, top, bottom) {
+        (true, _, true, _) => HTTOPLEFT,
+        (_, true, true, _) => HTTOPRIGHT,
+        (true, _, _, true) => HTBOTTOMLEFT,
+        (_, true, _, true) => HTBOTTOMRIGHT,
+        (true, ..) => HTLEFT,
+        (_, true, ..) => HTRIGHT,
+        (_, _, true, _) => HTTOP,
+        (_, _, _, true) => HTBOTTOM,
+        _ => return None,
+    })
+}
+
+/// 当前图片在桌面上的矩形（窗口去掉阴影边距）。
+fn image_rect(hwnd: HWND) -> Result<RECT> {
+    let mut rect = RECT::default();
+    unsafe { GetWindowRect(hwnd, &mut rect)? };
+    Ok(RECT {
+        left: rect.left + SHADOW,
+        top: rect.top + SHADOW,
+        right: rect.right - SHADOW,
+        bottom: rect.bottom - SHADOW,
+    })
+}
+
+fn hit_test(hwnd: HWND, point: POINT) -> LRESULT {
+    let Ok(image) = image_rect(hwnd) else {
+        return LRESULT(HTTRANSPARENT as isize);
+    };
+    let (drawing, scale) = with_picture(|p| (p.ink.tool.is_some() && !p.folded, p.ink.scale));
+    let stage = staging();
+    let adjustable = stage && adjustable();
+    if adjustable
+        && let Some(edge) = edge_at(image, point, (5.0 * scale.max(1.0)).round() as i32)
     {
-        // 涂鸦模式走客户区；普通模式用标题区消息区分拖动和双击。
-        LRESULT(if drawing { HTCLIENT } else { HTCAPTION } as isize)
+        return LRESULT(edge as isize);
+    }
+    let (width, height) = with_picture(|p| p.display_size());
+    if (image.left..image.left + width).contains(&point.x)
+        && (image.top..image.top + height).contains(&point.y)
+    {
+        // 涂鸦模式走客户区；普通模式用标题区消息区分拖动和双击；
+        // 截图阶段标注后选区锁定，不再拖动。
+        LRESULT(if drawing || (stage && !adjustable) {
+            HTCLIENT
+        } else {
+            HTCAPTION
+        } as isize)
     } else {
         LRESULT(HTTRANSPARENT as isize)
     }
+}
+
+/// 截图阶段：从冻结画面重新裁剪选区（限制在屏幕内且不小于 16 像素）。
+fn set_crop(hwnd: HWND, rect: RECT) -> Result<()> {
+    let Some(frozen) = STAGE.with(|stage| stage.borrow().as_ref().map(|s| s.frozen.clone())) else {
+        return Ok(());
+    };
+    let screen = frozen.screen;
+    let width = (rect.right - rect.left).clamp(MIN_SIDE, screen.right - screen.left);
+    let height = (rect.bottom - rect.top).clamp(MIN_SIDE, screen.bottom - screen.top);
+    let left = rect.left.clamp(screen.left, screen.right - width);
+    let top = rect.top.clamp(screen.top, screen.bottom - height);
+    let rect = RECT {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+    };
+    if image_rect(hwnd)? == rect {
+        return Ok(());
+    }
+    let pixels = frozen.crop(rect);
+    with_picture(|p| -> Result<()> {
+        let view = View {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+        p.ink.base.clone_from(&pixels);
+        p.pixels = pixels;
+        p.width = width;
+        p.height = height;
+        p.view = view;
+        p.zoom = 1.0;
+        p.zoom_surface = None;
+        p.surface = p.compose(view)?;
+        Ok(())
+    })?;
+    render(
+        hwnd,
+        Some(POINT {
+            x: left - SHADOW,
+            y: top - SHADOW,
+        }),
+    )
+}
+
+fn start_resize(hwnd: HWND, edge: u32, cursor: POINT) -> Result<()> {
+    let rect = image_rect(hwnd)?;
+    unsafe {
+        SetCapture(hwnd);
+        if GetCapture() == hwnd {
+            RESIZE.set(Some(Resize {
+                edge,
+                origin: cursor,
+                rect,
+            }));
+        }
+    }
+    Ok(())
+}
+
+fn move_resize(hwnd: HWND, resize: Resize) -> Result<()> {
+    let mut cursor = POINT::default();
+    unsafe { GetCursorPos(&mut cursor)? };
+    let (dx, dy) = (cursor.x - resize.origin.x, cursor.y - resize.origin.y);
+    let mut rect = resize.rect;
+    let edge = resize.edge;
+    if matches!(edge, HTLEFT | HTTOPLEFT | HTBOTTOMLEFT) {
+        rect.left = (rect.left + dx).min(rect.right - MIN_SIDE);
+    }
+    if matches!(edge, HTRIGHT | HTTOPRIGHT | HTBOTTOMRIGHT) {
+        rect.right = (rect.right + dx).max(rect.left + MIN_SIDE);
+    }
+    if matches!(edge, HTTOP | HTTOPLEFT | HTTOPRIGHT) {
+        rect.top = (rect.top + dy).min(rect.bottom - MIN_SIDE);
+    }
+    if matches!(edge, HTBOTTOM | HTBOTTOMLEFT | HTBOTTOMRIGHT) {
+        rect.bottom = (rect.bottom + dy).max(rect.top + MIN_SIDE);
+    }
+    // 拖到屏幕外时固定对边，只截断被拖动的一边。
+    if let Some(screen) = STAGE.with(|s| s.borrow().as_ref().map(|s| s.frozen.screen)) {
+        rect.left = rect.left.max(screen.left);
+        rect.top = rect.top.max(screen.top);
+        rect.right = rect.right.min(screen.right);
+        rect.bottom = rect.bottom.min(screen.bottom);
+    }
+    set_crop(hwnd, rect)
 }
 
 fn start_drag(hwnd: HWND, cursor: POINT) -> Result<()> {
@@ -710,6 +965,21 @@ fn move_drag(hwnd: HWND, offset: POINT) -> Result<()> {
     let mut cursor = POINT::default();
     unsafe {
         GetCursorPos(&mut cursor)?;
+        // 截图阶段移动的是选区：同尺寸重新裁剪冻结画面。
+        if staging() {
+            let image = image_rect(hwnd)?;
+            let left = cursor.x - offset.x + SHADOW;
+            let top = cursor.y - offset.y + SHADOW;
+            return set_crop(
+                hwnd,
+                RECT {
+                    left,
+                    top,
+                    right: left + image.right - image.left,
+                    bottom: top + image.bottom - image.top,
+                },
+            );
+        }
         // 直接使用桌面坐标，避免系统移动循环在松手时把窗口拉回工作区。
         SetWindowPos(
             hwnd,
@@ -725,7 +995,7 @@ fn move_drag(hwnd: HWND, offset: POINT) -> Result<()> {
 }
 
 fn stop_drag(hwnd: HWND) -> bool {
-    let dragging = DRAG_OFFSET.take().is_some();
+    let dragging = DRAG_OFFSET.take().is_some() | RESIZE.take().is_some();
     unsafe {
         if dragging && GetCapture() == hwnd {
             let _ = ReleaseCapture();
@@ -734,31 +1004,207 @@ fn stop_drag(hwnd: HWND) -> bool {
     dragging
 }
 
+/// 直接把桌面上的矩形截成贴图（不经框选）。应在独立工作线程调用。
 pub fn open(bounds: Bounds) -> Result<()> {
-    open_after_capture(bounds, || {})
-}
-
-/// 框选后复用贴图窗口及标注工具栏。应在独立工作线程调用。
-pub fn select_and_open() -> Result<()> {
-    select_and_open_after_capture(|| {})
-}
-
-pub fn select_and_open_after_capture(captured: impl FnOnce()) -> Result<()> {
-    let region = super::region::select_region().map_err(anyhow::Error::msg)?;
-    if let Some((x, y, width, height)) = region {
-        let bounds = Bounds::from_points(&[(x, y), (x + width, y + height)])?;
-        open_after_capture(bounds, captured)
-    } else {
-        Ok(())
+    unsafe {
+        SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
+    let picture = capture(bounds)?;
+    run(
+        picture,
+        POINT {
+            x: bounds.x,
+            y: bounds.y,
+        },
+        None,
+    )
+}
+
+/// 截图：冻结整屏后框选，进入截图编辑；截好整屏画面后调用 `captured`。
+/// 阻塞到截图结束（或转成的贴图关闭）。应在独立工作线程调用。
+pub fn screenshot(captured: impl FnOnce()) -> Result<()> {
+    let selected = super::region::select_frozen(captured).map_err(anyhow::Error::msg)?;
+    let Some(((x, y, width, height), frozen, backdrop)) = selected else {
+        return Ok(());
+    };
+    let rect = RECT {
+        left: x,
+        top: y,
+        right: x + width,
+        bottom: y + height,
+    };
+    let mut picture = Picture::new(frozen.crop(rect), width, height)?;
+    picture.handles = true;
+    run(
+        picture,
+        POINT { x, y },
+        Some(Stage {
+            frozen,
+            backdrop,
+        }),
+    )
+}
+
+/// 贴图键：截图中贴出选区；剪贴板有新内容时贴出（图片，或文字排版成的图片）；
+/// 否则依次恢复最近关闭的贴图；历史也空了就让所有贴图闪一下半透明。
+/// 贴出新图时阻塞到它关闭，应在独立工作线程调用。
+pub fn paste() -> Result<()> {
+    let stage = STAGING.load(Ordering::Acquire);
+    if stage != 0 {
+        unsafe {
+            PostMessageW(
+                Some(HWND(stage as *mut _)),
+                bar::COMMAND,
+                WPARAM(usize::from(bar::PIN)),
+                LPARAM(0),
+            )?;
+        }
+        return Ok(());
+    }
+    unsafe {
+        SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+    let sequence = super::clipboard::sequence_number();
+    if LAST_SEQUENCE.swap(sequence, Ordering::AcqRel) != sequence {
+        match clipboard_picture() {
+            Ok(Some(picture)) => {
+                let origin = near_cursor(picture.width, picture.height);
+                return run(picture, origin, None);
+            }
+            Ok(None) => {}
+            Err(e) => log::warn!("读取剪贴板贴图失败: {e:#}"),
+        }
+    }
+    let closed = CLOSED.lock().ok().and_then(|mut stack| stack.pop());
+    if let Some(closed) = closed {
+        return restore(closed);
+    }
+    if flash_all() == 0 {
+        bail!("剪贴板里没有图片或文字，也没有可恢复的贴图");
+    }
+    Ok(())
+}
+
+fn clipboard_picture() -> Result<Option<Picture>> {
+    use super::clipboard::PinContent;
+    let Some(content) = super::clipboard::pin_content()? else {
+        return Ok(None);
+    };
+    let (width, height, pixels) = match content {
+        PinContent::Image {
+            width,
+            height,
+            pixels,
+        } => (width, height, pixels),
+        PinContent::Text { text, rtf } => super::pin_rich::render(&text, rtf.as_deref())?,
+    };
+    Picture::new(pixels, width, height).map(Some)
+}
+
+/// 以光标为中心放置，并尽量留在光标所在显示器的工作区内。
+fn near_cursor(width: i32, height: i32) -> POINT {
+    let mut cursor = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut cursor);
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+        let place = |center: i32, size: i32, low: i32, high: i32| {
+            (center - size / 2).clamp(low, (high - size).max(low))
+        };
+        if GetMonitorInfoW(monitor, &mut info).as_bool() {
+            let work = info.rcWork;
+            return POINT {
+                x: place(cursor.x, width, work.left, work.right),
+                y: place(cursor.y, height, work.top, work.bottom),
+            };
+        }
+    }
+    POINT {
+        x: cursor.x - width / 2,
+        y: cursor.y - height / 2,
+    }
+}
+
+/// 恢复历史栈里的贴图：原位置、缩放、透明度，标注仍可继续编辑。
+fn restore(closed: Closed) -> Result<()> {
+    let mut picture = Picture::new(closed.base, closed.width, closed.height)?;
+    picture.ink.set_shapes(closed.shapes);
+    picture.pixels = closed.pixels;
+    picture.alpha = closed.alpha;
+    picture.surface = picture.compose(picture.view)?;
+    if (closed.zoom - 1.0).abs() > f64::EPSILON {
+        picture.zoom = closed.zoom;
+        picture.zoom_surface = scaled_surface(
+            &picture.surface,
+            zoom_size(closed.width, closed.height, closed.zoom),
+            false,
+        )?;
+    }
+    run(picture, closed.origin, None)
+}
+
+/// 关闭的贴图压入历史栈（超过上限时丢弃最早的）。
+fn push_closed(hwnd: HWND) {
+    let Ok(image) = image_rect(hwnd) else { return };
+    let closed = PICTURE.with(|p| {
+        let p = p.borrow();
+        let p = p.as_ref()?;
+        // 折叠时窗口只显示中间一块，按展开后的尺寸换算回原位置。
+        let (full_width, full_height) = zoom_size(p.width, p.height, p.zoom);
+        let (shown_width, shown_height) = p.display_size();
+        Some(Closed {
+            base: p.ink.base.clone(),
+            pixels: p.pixels.clone(),
+            shapes: p.ink.shapes(),
+            width: p.width,
+            height: p.height,
+            origin: POINT {
+                x: image.left - (full_width - shown_width) / 2,
+                y: image.top - (full_height - shown_height) / 2,
+            },
+            zoom: p.zoom,
+            alpha: p.alpha,
+        })
+    });
+    if let (Some(closed), Ok(mut stack)) = (closed, CLOSED.lock()) {
+        stack.push(closed);
+        if stack.len() > HISTORY {
+            stack.remove(0);
+        }
+    }
+}
+
+/// 让本进程所有贴图闪一下半透明；返回贴图数量。
+fn flash_all() -> usize {
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    let mut count = 0;
+    let mut after = None;
+    unsafe {
+        while let Ok(hwnd) = FindWindowExW(None, after, w!("NextGesturesQuickPin"), None) {
+            after = Some(hwnd);
+            let mut process = 0;
+            GetWindowThreadProcessId(hwnd, Some(&mut process));
+            if process == GetCurrentProcessId()
+                && !GetPropW(hwnd, w!("NextGesturesQuickPin")).is_invalid()
+                && PostMessageW(Some(hwnd), FLASH, WPARAM(0), LPARAM(0)).is_ok()
+            {
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
 pub(super) fn activate_native_window(hwnd: HWND) {
     ink::activate(hwnd);
 }
 
-/// 截取静态图片后立即通知调用方恢复轨迹层，不等贴图窗口关闭。
-pub fn open_after_capture(bounds: Bounds, captured: impl FnOnce()) -> Result<()> {
+/// 创建贴图窗口（图片左上角位于 `origin`）并运行消息循环，直到窗口关闭。
+/// 带 `stage` 时为截图阶段。
+fn run(picture: Picture, origin: POINT, stage: Option<Stage>) -> Result<()> {
     ensure!(
         COUNT
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < 20)
@@ -770,9 +1216,6 @@ pub fn open_after_capture(bounds: Bounds, captured: impl FnOnce()) -> Result<()>
     unsafe {
         SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
-    let picture = capture(bounds);
-    captured();
-    let picture = picture?;
     static CLASS: OnceLock<bool> = OnceLock::new();
     ensure!(
         *CLASS.get_or_init(|| unsafe {
@@ -786,18 +1229,22 @@ pub fn open_after_capture(bounds: Bounds, captured: impl FnOnce()) -> Result<()>
         }),
         "注册贴图窗口失败"
     );
+    let (width, height) = picture.display_size();
+    let alpha = picture.alpha;
+    let staged = stage.is_some();
     PICTURE.with(|p| *p.borrow_mut() = Some(picture));
+    STAGE.with(|s| *s.borrow_mut() = stage);
     let result = (|| -> Result<()> {
         unsafe {
             let hwnd = CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
                 w!("NextGesturesQuickPin"),
-                w!("贴图 · 拖动移动 / 滚轮缩放 / 空格折叠或恢复 / 双击关闭"),
+                w!("贴图 · 拖动移动 / 滚轮缩放 / 空格编辑 / 单按 Ctrl 折叠 / Esc 关闭"),
                 WS_POPUP,
-                bounds.x - SHADOW,
-                bounds.y - SHADOW,
-                bounds.width + SHADOW * 2,
-                bounds.height + SHADOW * 2,
+                origin.x - SHADOW,
+                origin.y - SHADOW,
+                width + SHADOW * 2,
+                height + SHADOW * 2,
                 None,
                 None,
                 None,
@@ -809,23 +1256,38 @@ pub fn open_after_capture(bounds: Bounds, captured: impl FnOnce()) -> Result<()>
                     w!("NextGesturesQuickPin"),
                     Some(HANDLE(1usize as *mut _)),
                 )?;
+                let scale = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
+                with_picture(|p| p.ink.scale = scale);
+                if staged {
+                    // 控制点按 DPI 重画。
+                    with_picture(|p| -> Result<()> {
+                        p.surface = p.compose(p.view)?;
+                        Ok(())
+                    })?;
+                }
                 render(
                     hwnd,
                     Some(POINT {
-                        x: bounds.x - SHADOW,
-                        y: bounds.y - SHADOW,
+                        x: origin.x - SHADOW,
+                        y: origin.y - SHADOW,
                     }),
                 )?;
-                super::pin_toolbar::create(hwnd, 255)?;
-                let scale = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
-                with_picture(|p| p.ink.scale = scale);
+                bar::create(hwnd, alpha, staged)?;
                 Ok(())
             })() {
                 let _ = DestroyWindow(hwnd);
                 return Err(e);
             }
             let _ = ShowWindow(hwnd, SW_SHOW);
-            // 截图完成即选中：辉光变亮、工具栏出现，可直接涂鸦或 Ctrl+C。
+            if staged {
+                STAGE.with(|s| {
+                    if let Some(stage) = s.borrow().as_ref() {
+                        stage.backdrop.attach(hwnd);
+                    }
+                });
+                STAGING.store(hwnd.0 as usize, Ordering::Release);
+            }
+            // 新贴图即选中（辉光变亮）；截图阶段同时显示工具栏。
             ink::activate(hwnd);
             let _ = PostMessageW(Some(hwnd), bar::SELECTION, WPARAM(0), LPARAM(0));
             let mut msg = MSG::default();
@@ -842,10 +1304,14 @@ pub fn open_after_capture(bounds: Bounds, captured: impl FnOnce()) -> Result<()>
                 if ink::pump(hwnd, &msg) {
                     continue;
                 }
+                if ctrl_tapped(&msg) {
+                    command(hwnd, TOGGLE_FOLD);
+                    continue;
+                }
                 // 贴图或其工具栏获得焦点时的快捷键（类似 Snipaste）。
                 if let Some(id) = ink::shortcut(&msg) {
                     // WM_KEYDOWN 的第 30 位表示按键此前已按下，长按空格时只切换一次。
-                    if id != TOGGLE_FOLD || msg.lParam.0 & (1 << 30) == 0 {
+                    if id != TOGGLE_TOOLBAR || msg.lParam.0 & (1 << 30) == 0 {
                         command(hwnd, id);
                     }
                     continue;
@@ -859,32 +1325,99 @@ pub fn open_after_capture(bounds: Bounds, captured: impl FnOnce()) -> Result<()>
             Ok(())
         }
     })();
+    if STAGE.with(|s| s.borrow_mut().take()).is_some() {
+        STAGING.store(0, Ordering::Release);
+    }
     PICTURE.with(|p| {
         p.borrow_mut().take();
     });
     result
 }
 
-/// 前台窗口属于本贴图（自身或其所属窗口）且未折叠时为选中：辉光变亮并显示工具栏。
+/// 单按 Ctrl（按下与松开之间没有其他按键或鼠标按键）时返回 true。
+fn ctrl_tapped(msg: &MSG) -> bool {
+    let control = msg.wParam.0 == usize::from(VK_CONTROL.0);
+    match msg.message {
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
+            if !control {
+                CTRL_TAP.set(false);
+            } else if msg.lParam.0 & (1 << 30) == 0 {
+                CTRL_TAP.set(true);
+            }
+            false
+        }
+        WM_KEYUP | WM_SYSKEYUP if control => CTRL_TAP.replace(false),
+        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN | WM_MOUSEWHEEL
+        | WM_MOUSEHWHEEL | WM_NCLBUTTONDOWN | WM_NCRBUTTONDOWN => {
+            CTRL_TAP.set(false);
+            false
+        }
+        _ => false,
+    }
+}
+
+/// 截图阶段 → 贴图：关闭暗色背景，换成贴图工具栏（默认收起），图片和标注保留。
+fn to_pinned(hwnd: HWND) -> Result<()> {
+    ink::drop_tool(hwnd)?;
+    stop_drag(hwnd);
+    if STAGE.with(|s| s.borrow_mut().take()).is_some() {
+        STAGING.store(0, Ordering::Release);
+    }
+    with_picture(|p| -> Result<()> {
+        p.handles = false;
+        p.toolbar = false;
+        p.surface = p.compose(p.view)?;
+        Ok(())
+    })?;
+    render(hwnd, None)?;
+    bar::destroy();
+    bar::create(hwnd, with_picture(|p| p.alpha), false)?;
+    ink::activate(hwnd);
+    update_selection(hwnd)
+}
+
+/// 贴图阶段打开工具栏进入编辑。
+fn open_toolbar(hwnd: HWND) -> Result<()> {
+    if with_picture(|p| p.folded) {
+        toggle_fold(hwnd)?;
+    }
+    with_picture(|p| p.toolbar = true);
+    update_selection(hwnd)
+}
+
+/// 完成编辑：落定标注、取消工具并收起工具栏。
+fn finish_editing(hwnd: HWND) -> Result<()> {
+    ink::drop_tool(hwnd)?;
+    with_picture(|p| p.toolbar = false);
+    update_selection(hwnd)
+}
+
+/// 前台窗口属于本贴图（自身或其所属窗口）且未折叠时为选中，辉光变亮。
+/// 截图阶段始终选中并显示工具栏；贴图阶段选中且按空格打开编辑时才显示工具栏。
 fn update_selection(hwnd: HWND) -> Result<()> {
     let owned = unsafe {
         let foreground = GetForegroundWindow();
         !foreground.is_invalid()
             && (foreground == hwnd || GetAncestor(foreground, GA_ROOTOWNER) == hwnd)
     };
-    let (changed, selected) = with_picture(|p| {
-        let selected = owned && !p.folded;
+    let stage = staging();
+    let (changed, show) = with_picture(|p| {
+        let selected = stage || (owned && !p.folded);
+        let show = selected && (stage || p.toolbar);
         if p.selected == selected {
-            return (false, selected);
+            return (false, show);
         }
         p.selected = selected;
         paint_frame(&mut p.surface, selected);
+        if p.handles {
+            paint_handles(&mut p.surface, p.ink.scale);
+        }
         if let Some(surface) = &mut p.zoom_surface {
             paint_frame(surface, selected);
         }
-        (true, selected)
+        (true, show)
     });
-    bar::set_selected(selected);
+    bar::set_selected(show);
     if changed { render(hwnd, None) } else { Ok(()) }
 }
 
@@ -900,11 +1433,20 @@ fn report_render_error(result: Result<()>) {
     }
 }
 
+/// 默认文件名带本地时间，例如 NextGestures_2026-11-26_09-30-05.png。
+fn default_file_name() -> String {
+    let time = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    format!(
+        "NextGestures_{:04}-{:02}-{:02}_{:02}-{:02}-{:02}.png",
+        time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond
+    )
+}
+
 fn save_png(owner: HWND, bytes: &[u8]) -> Result<bool> {
     use windows::Win32::UI::Controls::Dialogs::*;
     use windows::core::{PCWSTR, PWSTR};
     let mut path = [0u16; 32768];
-    let name: Vec<_> = "贴图.png".encode_utf16().collect();
+    let name: Vec<_> = default_file_name().encode_utf16().collect();
     path[..name.len()].copy_from_slice(&name);
     let filter: Vec<_> = "PNG 图片\0*.png\0\0".encode_utf16().collect();
     let mut dialog = OPENFILENAMEW {
@@ -931,10 +1473,25 @@ fn save_png(owner: HWND, bytes: &[u8]) -> Result<bool> {
     Ok(true)
 }
 
+/// 选择标注工具的命令（Ctrl+1~6 / E / 工具栏按钮）。
+fn is_tool(id: u16) -> bool {
+    matches!(
+        id,
+        bar::RECT_TOOL
+            | bar::LINE_TOOL
+            | bar::PEN
+            | bar::MARKER
+            | bar::MOSAIC
+            | bar::TEXT
+            | bar::ERASER
+    )
+}
+
 fn command(hwnd: HWND, id: u16) {
     if PICTURE.with(|p| p.borrow().as_ref().is_none_or(|p| p.exporting)) {
         return;
     }
+    let stage = staging();
     let result = (|| -> Result<()> {
         match id {
             bar::COPY => {
@@ -945,7 +1502,12 @@ fn command(hwnd: HWND, id: u16) {
                     (p.width, p.height, p.pixels.clone())
                 });
                 super::clipboard::set_image_bgra(hwnd, width, height, &pixels)?;
-                bar::feedback(bar::COPY);
+                if stage {
+                    // 截图阶段：复制后退出。
+                    unsafe { DestroyWindow(hwnd)? };
+                } else {
+                    bar::feedback(bar::COPY);
+                }
             }
             bar::SAVE => {
                 ink::settle(hwnd)?;
@@ -956,10 +1518,14 @@ fn command(hwnd: HWND, id: u16) {
                 PICTURE.with(|p| p.borrow_mut().as_mut().unwrap().exporting = false);
                 bar::busy(false);
                 if saved? {
-                    bar::feedback(bar::SAVE);
+                    if stage {
+                        unsafe { DestroyWindow(hwnd)? };
+                    } else {
+                        bar::feedback(bar::SAVE);
+                    }
                 }
             }
-            bar::LESS | bar::MORE => {
+            bar::LESS | bar::MORE if !stage => {
                 let alpha = PICTURE.with(|p| {
                     let mut p = p.borrow_mut();
                     let p = p.as_mut().unwrap();
@@ -970,13 +1536,45 @@ fn command(hwnd: HWND, id: u16) {
                 render(hwnd, None)?;
                 bar::alpha(alpha);
             }
+            bar::PIN if stage => to_pinned(hwnd)?,
             bar::CLOSE => unsafe {
                 DestroyWindow(hwnd)?;
             },
-            TOGGLE_FOLD => {
-                ink::settle(hwnd)?;
+            bar::DONE if !stage => finish_editing(hwnd)?,
+            TOGGLE_TOOLBAR if !stage => {
+                if with_picture(|p| p.toolbar) {
+                    finish_editing(hwnd)?;
+                } else {
+                    open_toolbar(hwnd)?;
+                }
+            }
+            TOGGLE_FOLD if !stage => {
+                if with_picture(|p| p.toolbar) {
+                    finish_editing(hwnd)?;
+                } else {
+                    ink::settle(hwnd)?;
+                }
                 toggle_fold(hwnd)?;
             }
+            // Esc：先提交文字 / 取消草稿；截图阶段随后退出，贴图阶段编辑中为「完成」，否则关闭。
+            bar::ESCAPE => {
+                if ink::escape_edit(hwnd)? {
+                    return Ok(());
+                }
+                if !stage && with_picture(|p| p.toolbar) {
+                    finish_editing(hwnd)?;
+                } else {
+                    unsafe { DestroyWindow(hwnd)? };
+                }
+            }
+            id if is_tool(id) && !stage && !with_picture(|p| p.toolbar) => {
+                // 未打开工具栏时单键 E 不生效；Ctrl+数字直接进入编辑并选中工具。
+                if id != bar::ERASER {
+                    open_toolbar(hwnd)?;
+                    ink::command(hwnd, id)?;
+                }
+            }
+            bar::PIN | bar::DONE | bar::LESS | bar::MORE | TOGGLE_TOOLBAR | TOGGLE_FOLD => {}
             _ => {
                 ink::command(hwnd, id)?;
             }
@@ -988,11 +1586,42 @@ fn command(hwnd: HWND, id: u16) {
         bar::error(&format!("{e:#}"));
     }
 }
+
+fn flash(hwnd: HWND, on: bool) {
+    with_picture(|p| p.flash = on);
+    unsafe {
+        if on {
+            SetTimer(Some(hwnd), FLASH_TIMER, FLASH_MS, None);
+        } else {
+            let _ = KillTimer(Some(hwnd), FLASH_TIMER);
+        }
+    }
+    report_render_error(render(hwnd, None));
+}
+
+fn is_edge(code: usize) -> bool {
+    [
+        HTLEFT,
+        HTRIGHT,
+        HTTOP,
+        HTTOPLEFT,
+        HTTOPRIGHT,
+        HTBOTTOM,
+        HTBOTTOMLEFT,
+        HTBOTTOMRIGHT,
+    ]
+    .contains(&(code as u32))
+}
+
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         match message {
             super::pin_toolbar::COMMAND => {
                 command(hwnd, wp.0 as u16);
+                LRESULT(0)
+            }
+            FLASH => {
+                flash(hwnd, true);
                 LRESULT(0)
             }
             WM_ACTIVATE => {
@@ -1005,7 +1634,9 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
                 LRESULT(0)
             }
             WM_MOUSEMOVE => {
-                let result = if let Some(offset) = DRAG_OFFSET.get() {
+                let result = if let Some(resize) = RESIZE.get() {
+                    move_resize(hwnd, resize)
+                } else if let Some(offset) = DRAG_OFFSET.get() {
                     move_drag(hwnd, offset)
                 } else {
                     ink::pointer_move(hwnd, point(lp), wp.0 & 0x0004 != 0)
@@ -1028,6 +1659,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
             }
             WM_CAPTURECHANGED => {
                 DRAG_OFFSET.set(None);
+                RESIZE.set(None);
                 DefWindowProcW(hwnd, message, wp, lp)
             }
             WM_CANCELMODE => {
@@ -1047,6 +1679,11 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
                 }
                 DefWindowProcW(hwnd, message, wp, lp)
             }
+            // 截图阶段可拖动选区时显示移动光标。
+            WM_SETCURSOR if (lp.0 & 0xffff) as u32 == HTCAPTION && staging() => {
+                SetCursor(LoadCursorW(None, IDC_SIZEALL).ok());
+                LRESULT(1)
+            }
             WM_CHAR if ink::editing() => {
                 report_render_error(ink::char_input(hwnd, wp.0 as u16));
                 LRESULT(0)
@@ -1057,6 +1694,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
             }
             WM_TIMER if wp.0 == ink::CARET_TIMER => {
                 report_render_error(ink::caret_tick(hwnd));
+                LRESULT(0)
+            }
+            WM_TIMER if wp.0 == FLASH_TIMER => {
+                flash(hwnd, false);
                 LRESULT(0)
             }
             WM_TIMER if wp.0 == ZOOM_BADGE_TIMER => {
@@ -1082,10 +1723,16 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
                 report_render_error(start_drag(hwnd, point(lp)));
                 LRESULT(0)
             }
-            WM_NCLBUTTONDBLCLK => {
-                command(hwnd, bar::CLOSE);
+            WM_NCLBUTTONDOWN if is_edge(wp.0) && staging() => {
+                report_render_error(start_resize(hwnd, wp.0 as u32, point(lp)));
                 LRESULT(0)
             }
+            // 双击：截图阶段复制并退出（类 Snipaste），贴图阶段关闭。
+            WM_NCLBUTTONDBLCLK if wp.0 == HTCAPTION as usize => {
+                command(hwnd, if staging() { bar::COPY } else { bar::CLOSE });
+                LRESULT(0)
+            }
+            WM_NCLBUTTONDBLCLK => LRESULT(0),
             WM_NCRBUTTONDOWN | WM_RBUTTONDOWN => LRESULT(0),
             // 涂鸦模式右键：结束折线 / 提交文字 / 退出涂鸦，不关闭贴图。
             WM_RBUTTONUP if with_picture(|p| p.ink.tool.is_some()) => {
@@ -1098,7 +1745,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
                 LRESULT(0)
             }
             WM_KEYDOWN if wp.0 == 27 => {
-                command(hwnd, ink::ESCAPE);
+                command(hwnd, bar::ESCAPE);
                 LRESULT(0)
             }
 
@@ -1116,6 +1763,13 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
             WM_DESTROY => {
                 stop_drag(hwnd);
                 hide_zoom_badge(hwnd);
+                let _ = KillTimer(Some(hwnd), FLASH_TIMER);
+                // 截图阶段退出时关闭暗色背景；贴图关闭后压入历史栈供贴图键恢复。
+                if STAGE.with(|s| s.borrow_mut().take()).is_some() {
+                    STAGING.store(0, Ordering::Release);
+                } else {
+                    push_closed(hwnd);
+                }
                 let _ = RemovePropW(hwnd, w!("NextGesturesQuickPin"));
                 PostQuitMessage(0);
                 LRESULT(0)
@@ -1216,6 +1870,9 @@ mod tests {
             exporting: false,
             selected: false,
             ink: ink::Annotate::default(),
+            toolbar: false,
+            flash: false,
+            handles: false,
         };
         let bytes = picture.png().unwrap();
         let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
@@ -1355,11 +2012,15 @@ mod tests {
         let evidence = unsafe {
             DestroyWindow(backdrop.1).unwrap();
             let initial_pixel = await_gray(150, 150, 0);
-            // 截图后贴图立即激活，工具栏随之出现。
+            // 贴图立即激活；工具栏默认收起，按空格打开。
             let toolbar = FindWindowW(w!("NextGesturesPinToolbar"), None).unwrap();
             ink::activate(hwnd);
             assert_eq!(GetForegroundWindow(), hwnd);
             SendMessageW(hwnd, bar::SELECTION, None, None);
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(!IsWindowVisible(toolbar).as_bool(), "toolbar should wait for Space");
+            PostMessageW(Some(hwnd), WM_KEYDOWN, WPARAM(usize::from(VK_SPACE.0)), LPARAM(1))
+                .unwrap();
             windows::Win32::Graphics::Dwm::DwmFlush().unwrap();
             let shadow_pixel = gray(99, 180);
             let deadline = Instant::now() + Duration::from_secs(2);
@@ -1474,14 +2135,12 @@ mod tests {
             let own = is_at((150, 150));
             let mut original = RECT::default();
             GetWindowRect(hwnd, &mut original).unwrap();
-            let press_space = |previously_down| {
-                PostMessageW(
-                    Some(hwnd),
-                    WM_KEYDOWN,
-                    WPARAM(usize::from(VK_SPACE.0)),
-                    LPARAM(1 | if previously_down { 1 << 30 } else { 0 }),
-                )
-                .unwrap();
+            // 单按 Ctrl（含长按产生的重复按下）切换折叠一次。
+            let tap_ctrl = || {
+                let ctrl = WPARAM(usize::from(VK_CONTROL.0));
+                PostMessageW(Some(hwnd), WM_KEYDOWN, ctrl, LPARAM(1)).unwrap();
+                PostMessageW(Some(hwnd), WM_KEYDOWN, ctrl, LPARAM(1 | 1 << 30)).unwrap();
+                PostMessageW(Some(hwnd), WM_KEYUP, ctrl, LPARAM(1 | 3 << 30)).unwrap();
             };
             let await_width = |width| {
                 let deadline = Instant::now() + Duration::from_secs(2);
@@ -1494,8 +2153,7 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(20));
                 }
             };
-            press_space(false);
-            press_space(true);
+            tap_ctrl();
             let folded = await_width(104);
             SetWindowPos(
                 hwnd,
@@ -1507,7 +2165,7 @@ mod tests {
                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
             )
             .unwrap();
-            press_space(false);
+            tap_ctrl();
             let restored = await_width(280);
             let cursor = packed(170, 180);
             SendMessageW(

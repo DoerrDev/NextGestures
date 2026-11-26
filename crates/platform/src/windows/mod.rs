@@ -2,6 +2,7 @@ pub mod clipboard;
 pub mod pin;
 mod pin_draw;
 mod pin_icons;
+mod pin_rich;
 mod pin_text;
 pub(crate) mod pin_toolbar;
 pub mod region;

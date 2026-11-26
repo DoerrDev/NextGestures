@@ -1,6 +1,10 @@
 const zhCN = {
-  actionScreenshot: '区域截图并置顶',
-  screenshotActionHint: '触发后拖出截图区域。贴图底部可复制、保存或调节透明度。按空格折叠或恢复，双击关闭。',
+  actionScreenshot: '区域截图',
+  screenshotActionHint:
+    '触发后拖出截图区域，选区可拖动边角调整。工具栏：退出 Esc、贴图 Ctrl+T（或贴图快捷键）、保存 Ctrl+S、复制 Ctrl+C，其余为标注工具。',
+  actionPin: '贴图',
+  pinActionHint:
+    '截图时贴出选区；否则贴出剪贴板里的图片，文字会排版成图片。剪贴板没变时再按，依次恢复关闭过的贴图。贴图上按空格打开编辑工具栏，Esc 完成或关闭，单按 Ctrl 折叠。',
   actionRecordRegion: '区域录屏',
   recordActionHint: '触发后拖出录制区域。录屏仅采集画面，停止后可选择导出格式。',
   aiBaseUrl: 'OpenAI 兼容接口地址',
@@ -219,6 +223,7 @@ const zhCN = {
   tileOpenUrl: '打开网址',
   tileLaunchApp: '启动程序',
   tileScreenshot: '截图',
+  tilePin: '贴图',
   tileRecordRegion: '录屏',
   tileMore: '更多',
   tileNone: '无',

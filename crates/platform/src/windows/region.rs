@@ -1,6 +1,7 @@
 //! Shared, physical-pixel desktop selector. The Win32 window and loop live on the caller's worker.
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -38,6 +39,102 @@ struct Selection {
     drag: Option<RECT>,
     result: Option<Region>,
     frame: Option<PaintBuffer>,
+    /// 截图模式：框选前冻结的整屏画面，框选时以它为底而不是透出实时桌面。
+    frozen: Option<Rc<Frozen>>,
+    /// 框选完成后窗口留作截图编辑的暗色背景，不再响应框选。
+    backdrop: bool,
+    /// 背景模式下右键 / 关闭转交给截图编辑窗口。
+    owner: Option<HWND>,
+}
+
+/// 冻结的虚拟桌面画面（物理像素，BGRA，不透明）。
+pub(super) struct Frozen {
+    pub(super) screen: RECT,
+    bright: Vec<u32>,
+    dim: Vec<u32>,
+}
+
+impl Frozen {
+    fn capture(screen: RECT) -> windows::core::Result<Self> {
+        let (width, height) = (screen.right - screen.left, screen.bottom - screen.top);
+        let buffer = PaintBuffer::new(width, height)?;
+        unsafe {
+            let desktop = GetDC(None);
+            if desktop.is_invalid() {
+                return Err(windows::core::Error::from_thread());
+            }
+            let result = BitBlt(
+                buffer.dc,
+                0,
+                0,
+                width,
+                height,
+                Some(desktop),
+                screen.left,
+                screen.top,
+                SRCCOPY | CAPTUREBLT,
+            );
+            ReleaseDC(None, desktop);
+            result?;
+            let _ = GdiFlush();
+        }
+        let count = width as usize * height as usize;
+        let bright: Vec<u32> = unsafe { std::slice::from_raw_parts(buffer.pixels, count) }
+            .iter()
+            .map(|pixel| pixel | 0xff00_0000)
+            .collect();
+        let dim = bright.iter().map(|&pixel| dimmed(pixel)).collect();
+        Ok(Self { screen, bright, dim })
+    }
+
+    /// 截取桌面坐标中的矩形（须位于屏幕内），返回 BGRA 字节。
+    pub(super) fn crop(&self, rect: RECT) -> Vec<u8> {
+        let stride = (self.screen.right - self.screen.left) as usize;
+        let (x, y) = ((rect.left - self.screen.left) as usize, (rect.top - self.screen.top) as usize);
+        let width = (rect.right - rect.left) as usize;
+        let mut out = Vec::with_capacity(width * (rect.bottom - rect.top) as usize * 4);
+        for row in 0..(rect.bottom - rect.top) as usize {
+            let start = (y + row) * stride + x;
+            for pixel in &self.bright[start..start + width] {
+                out.extend_from_slice(&pixel.to_le_bytes());
+            }
+        }
+        out
+    }
+}
+
+/// 与实时框选时 0x90 黑色遮罩叠加后的颜色一致。
+fn dimmed(pixel: u32) -> u32 {
+    let scale = |shift: u32| (((pixel >> shift) & 0xff) * 111 / 255) << shift;
+    0xff00_0000 | scale(16) | scale(8) | scale(0)
+}
+
+/// 截图编辑期间保留的冻结背景窗口；释放时关闭窗口并结束框选会话。
+pub(super) struct Backdrop {
+    hwnd: HWND,
+    _session: Session,
+}
+
+impl Backdrop {
+    /// 编辑窗口接管后整屏变暗，选区由编辑窗口自己显示。
+    pub(super) fn attach(&self, owner: HWND) {
+        SELECTION.with(|cell| {
+            let mut state = cell.borrow_mut();
+            state.owner = Some(owner);
+            state.drag = None;
+            state.hover = None;
+        });
+        let _ = render(self.hwnd, None);
+    }
+}
+
+impl Drop for Backdrop {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DestroyWindow(self.hwnd);
+        }
+        SELECTION.with(|cell| *cell.borrow_mut() = Selection::default());
+    }
 }
 
 struct PaintBuffer {
@@ -91,6 +188,16 @@ impl PaintBuffer {
             let length = (rect.right - rect.left) as usize;
             // All rectangles are clipped to the top-down 32-bit DIB before painting.
             unsafe { std::slice::from_raw_parts_mut(self.pixels.add(offset), length) }.fill(pixel);
+        }
+    }
+
+    /// 从同尺寸的整屏像素复制矩形区域。
+    fn copy(&mut self, rect: RECT, source: &[u32]) {
+        for y in rect.top..rect.bottom {
+            let offset = y as usize * self.width + rect.left as usize;
+            let length = (rect.right - rect.left) as usize;
+            unsafe { std::slice::from_raw_parts_mut(self.pixels.add(offset), length) }
+                .copy_from_slice(&source[offset..offset + length]);
         }
     }
 }
@@ -206,10 +313,44 @@ pub fn select_region() -> Result<Option<Region>, String> {
     if session.0.is_invalid() {
         return Err("初始化框选窗口 DPI 失败".into());
     }
-    unsafe { select() }.map_err(|err| err.to_string())
+    unsafe { select(false, || {}) }
+        .map(|selected| selected.map(|(region, _)| region))
+        .map_err(|err| err.to_string())
 }
 
-unsafe fn select() -> windows::core::Result<Option<Region>> {
+/// 截图框选：先冻结整屏（随后调用 `captured`），在冻结画面上框选；
+/// 选中后框选窗口不关闭，作为暗色背景交给截图编辑使用。
+/// 返回 None 表示另一个框选或截图正在进行，或用户取消。
+pub(super) fn select_frozen(
+    captured: impl FnOnce(),
+) -> Result<Option<(Region, Rc<Frozen>, Backdrop)>, String> {
+    if ACTIVE.swap(true, Ordering::AcqRel) {
+        captured();
+        return Ok(None);
+    }
+    let session = Session(unsafe {
+        SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+    });
+    if session.0.is_invalid() {
+        captured();
+        return Err("初始化框选窗口 DPI 失败".into());
+    }
+    match unsafe { select(true, captured) } {
+        Ok(Some((region, Some(hwnd)))) => {
+            let frozen = SELECTION.with(|cell| cell.borrow().frozen.clone());
+            let frozen = frozen.expect("frozen selection keeps its capture");
+            Ok(Some((region, frozen, Backdrop { hwnd, _session: session })))
+        }
+        Ok(_) => Ok(None),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// 第二个返回值是留作背景的窗口（仅冻结模式选中时）。
+unsafe fn select(
+    freeze: bool,
+    captured: impl FnOnce(),
+) -> windows::core::Result<Option<(Region, Option<HWND>)>> {
     unsafe {
         if !*WINDOW_CLASS.get_or_init(|| {
             RegisterClassW(&WNDCLASSW {
@@ -219,6 +360,7 @@ unsafe fn select() -> windows::core::Result<Option<Region>> {
                 ..Default::default()
             }) != 0
         }) {
+            captured();
             return Err(windows::core::Error::from_thread());
         }
         let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
@@ -231,6 +373,9 @@ unsafe fn select() -> windows::core::Result<Option<Region>> {
             right: x + width,
             bottom: y + height,
         };
+        let frozen = if freeze { Some(Frozen::capture(screen)) } else { None };
+        captured();
+        let frozen = frozen.transpose()?.map(Rc::new);
         let frame = PaintBuffer::new(width, height)?;
         // Snapshot the underlying top-level windows before the selector enters the Z order.
         let windows = visible_windows(screen);
@@ -254,6 +399,7 @@ unsafe fn select() -> windows::core::Result<Option<Region>> {
                 screen,
                 windows,
                 frame: Some(frame),
+                frozen,
                 ..Default::default()
             };
             let mut cursor = POINT::default();
@@ -266,7 +412,9 @@ unsafe fn select() -> windows::core::Result<Option<Region>> {
             super::pin::activate_native_window(hwnd);
             SetTimer(Some(hwnd), ELEMENT_TIMER, 32, None);
             let mut message = MSG::default();
-            while IsWindow(Some(hwnd)).as_bool() {
+            while IsWindow(Some(hwnd)).as_bool()
+                && !SELECTION.with(|cell| cell.borrow().backdrop)
+            {
                 match GetMessageW(&mut message, None, 0, 0).0 {
                     -1 => return Err(windows::core::Error::from_thread()),
                     0 => break,
@@ -278,6 +426,13 @@ unsafe fn select() -> windows::core::Result<Option<Region>> {
             }
             Ok(SELECTION.with(|cell| cell.borrow_mut().result.take()))
         })();
+        if let Ok(Some(region)) = run
+            && freeze
+            && IsWindow(Some(hwnd)).as_bool()
+        {
+            let _ = KillTimer(Some(hwnd), ELEMENT_TIMER);
+            return Ok(Some((region, Some(hwnd))));
+        }
         if IsWindow(Some(hwnd)).as_bool() {
             let _ = DestroyWindow(hwnd);
         }
@@ -286,7 +441,7 @@ unsafe fn select() -> windows::core::Result<Option<Region>> {
         if run.as_ref().is_ok_and(Option::is_some) {
             let _ = DwmFlush();
         }
-        run
+        run.map(|region| region.map(|region| (region, None)))
     }
 }
 
@@ -425,7 +580,37 @@ unsafe fn cancel(hwnd: HWND) {
     }
 }
 
+/// 截图编辑期间的背景：不再框选；点击把焦点还给编辑窗口，右键 / 关闭退出截图。
+unsafe fn backdrop_procedure(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    let owner = SELECTION.with(|cell| cell.borrow().owner);
+    unsafe {
+        match msg {
+            // 点击背景不激活、不改变层级，避免盖住选区和工具栏。
+            WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+            WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_MBUTTONDOWN => {
+                if let Some(owner) = owner {
+                    super::pin::activate_native_window(owner);
+                }
+                LRESULT(0)
+            }
+            WM_RBUTTONUP | WM_CLOSE | WM_DISPLAYCHANGE => {
+                if let Some(owner) = owner {
+                    let _ = PostMessageW(Some(owner), WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
+                LRESULT(0)
+            }
+            WM_RBUTTONDOWN | WM_MOUSEMOVE | WM_LBUTTONUP | WM_TIMER | WM_CAPTURECHANGED
+            | WM_CANCELMODE => LRESULT(0),
+            WM_ERASEBKGND => LRESULT(1),
+            _ => DefWindowProcW(hwnd, msg, wp, lp),
+        }
+    }
+}
+
 unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if SELECTION.with(|cell| cell.try_borrow().is_ok_and(|state| state.backdrop)) {
+        return unsafe { backdrop_procedure(hwnd, msg, wp, lp) };
+    }
     unsafe {
         match msg {
             WM_DISPLAYCHANGE | WM_CANCELMODE | WM_CLOSE | WM_RBUTTONDOWN => {
@@ -496,7 +681,19 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                     };
                     if end.is_some() && target.is_some() {
                         state.result = target;
-                        return (true, None);
+                        // 截图模式保留窗口作背景，消息循环看到该标记后返回。
+                        state.backdrop = state.frozen.is_some();
+                        if state.backdrop
+                            && let Some((x, y, width, height)) = target
+                        {
+                            state.drag = Some(RECT {
+                                left: x,
+                                top: y,
+                                right: x + width,
+                                bottom: y + height,
+                            });
+                        }
+                        return (!state.backdrop, None);
                     }
                     if let Some(point) = end {
                         state.update_hover(point);
@@ -556,13 +753,20 @@ fn render(hwnd: HWND, dirty: Option<RECT>) -> windows::core::Result<()> {
             ..Default::default()
         });
         let selection = state.client_selection();
+        let frozen = state.frozen.clone();
         let frame = state.frame.as_mut().expect("selector paint buffer");
-        frame.fill(dirty, 0x9000_0000);
+        match &frozen {
+            Some(frozen) => frame.copy(dirty, &frozen.dim),
+            None => frame.fill(dirty, 0x9000_0000),
+        }
         if let Some(rect) = selection
             && let Some(inside) = intersection(dirty, rect)
         {
-            // Nonzero alpha keeps the highlighted interior nearly clear and still hit-testable.
-            frame.fill(inside, 0x0100_0000);
+            match &frozen {
+                Some(frozen) => frame.copy(inside, &frozen.bright),
+                // Nonzero alpha keeps the highlighted interior nearly clear and still hit-testable.
+                None => frame.fill(inside, 0x0100_0000),
+            }
             let sides = [
                 RECT {
                     right: (rect.left + 2).min(rect.right),

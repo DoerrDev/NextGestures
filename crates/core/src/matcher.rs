@@ -263,6 +263,7 @@ mod tests {
         let input = input(TriggerButton::Right, &stroke);
         for action in [
             Action::Screenshot,
+            Action::Pin,
             Action::RecordRegion,
             Action::AiCustom { id: crate::ai_presets::TRANSLATE_ID.into() },
         ] {

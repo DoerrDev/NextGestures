@@ -10,7 +10,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 
 pub(super) const CARET_TIMER: usize = 7;
-pub(super) const ESCAPE: u16 = 150;
+pub(super) const ESCAPE: u16 = bar::ESCAPE;
 
 /// 每种工具的默认粗细（逻辑像素；文字为字号）与可调范围。
 const SIZES: [(f32, f32, f32); 7] = [
@@ -79,6 +79,20 @@ impl Annotate {
             sizes: SIZES.map(|s| s.0),
             ..Default::default()
         }
+    }
+    /// 已有标注（含进行中的草稿或文字）：截图选区随之锁定。
+    pub(super) fn marked(&self) -> bool {
+        !self.shapes.is_empty() || self.draft.is_some() || self.edit.is_some()
+    }
+    /// 已提交的形状，用于关闭后压入历史栈。
+    pub(super) fn shapes(&self) -> Vec<Shape> {
+        self.shapes.iter().map(|shape| Shape::clone(shape)).collect()
+    }
+    /// 恢复历史贴图的形状；`Picture::pixels` 需由调用方一并恢复。
+    pub(super) fn set_shapes(&mut self, shapes: Vec<Shape>) {
+        self.shapes = shapes.into_iter().map(Rc::new).collect();
+        self.history.clear();
+        self.last = None;
     }
     /// 当前工具的物理像素粗细（文字为字号）。
     fn width(&self, tool: Tool) -> f32 {
@@ -216,7 +230,7 @@ fn put(canvas: &mut Canvas, x: i32, y: i32, bgr: [u8; 3]) {
 
 impl Picture {
     /// 把当前图片（含草稿与正在编辑的文字）写入已合成 DIB 的内容区，阴影保持不变。
-    pub(super) fn paint_view(&mut self) {
+    pub(super) fn paint_content(&mut self) {
         let Picture {
             pixels,
             width,
@@ -408,6 +422,7 @@ pub(super) fn shortcut(msg: &MSG) -> Option<u16> {
         return match key as u8 {
             b'C' => Some(bar::COPY),
             b'S' => Some(bar::SAVE),
+            b'T' => Some(bar::PIN),
             b'Z' => Some(bar::UNDO),
             b'1' => Some(bar::RECT_TOOL),
             b'2' => Some(bar::LINE_TOOL),
@@ -423,7 +438,7 @@ pub(super) fn shortcut(msg: &MSG) -> Option<u16> {
     } else if key == usize::from(VK_ESCAPE.0) {
         Some(ESCAPE)
     } else if key == usize::from(VK_SPACE.0) {
-        Some(TOGGLE_FOLD)
+        Some(TOGGLE_TOOLBAR)
     } else {
         None
     }
@@ -1058,19 +1073,29 @@ pub(super) fn right_click(hwnd: HWND) -> Result<()> {
     }
 }
 
-/// Esc：提交文字 → 取消草稿 → 退出涂鸦 → 关闭贴图。
-fn escape(hwnd: HWND) -> Result<()> {
+/// Esc 的第一步：提交正在编辑的文字或取消草稿；返回 false 表示没有可处理的，
+/// 由调用方决定退出截图 / 完成编辑 / 关闭贴图。
+pub(super) fn escape_edit(hwnd: HWND) -> Result<bool> {
     if editing() {
-        return finish_text(hwnd);
+        finish_text(hwnd)?;
+        return Ok(true);
     }
     if with_picture(|p| p.ink.draft.take().is_some()) {
-        return redraw(hwnd);
+        redraw(hwnd)?;
+        return Ok(true);
     }
+    Ok(false)
+}
+
+/// 完成编辑：落定草稿和文字并取消当前工具。
+pub(super) fn drop_tool(hwnd: HWND) -> Result<()> {
+    settle(hwnd)?;
     if with_picture(|p| p.ink.tool.take().is_some()) {
         sync_bar();
-        return redraw(hwnd);
+        refresh_cursor(hwnd);
+        redraw(hwnd)?;
     }
-    unsafe { Ok(DestroyWindow(hwnd)?) }
+    Ok(())
 }
 
 /// 涂鸦相关命令；返回 false 表示不是涂鸦命令。
@@ -1106,7 +1131,6 @@ pub(super) fn command(hwnd: HWND, id: u16) -> Result<bool> {
         id if (bar::SWATCH..bar::SWATCH + bar::SWATCHES.len() as u16).contains(&id) => {
             set_color(hwnd, bar::SWATCHES[(id - bar::SWATCH) as usize])?;
         }
-        ESCAPE => escape(hwnd)?,
         _ => return Ok(false),
     }
     Ok(true)

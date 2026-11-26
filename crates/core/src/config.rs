@@ -93,6 +93,8 @@ pub enum Action {
     None,
     #[serde(alias = "pin_screenshot")]
     Screenshot,
+    /// 贴图：截图中贴出选区；否则贴出剪贴板（图片或文字），剪贴板未变时依次恢复关闭过的贴图
+    Pin,
     RecordRegion,
     /// 「我的动作」里的 AI 动作；旧版内置的翻译 / 润色 / 粤拼在读取配置时迁移为对应预设
     AiCustom { id: String },
@@ -693,6 +695,7 @@ fn describe_action(action: &Action) -> String {
     match action {
         Action::None => "快捷键".into(),
         Action::Screenshot => "截图".into(),
+        Action::Pin => "贴图".into(),
         Action::RecordRegion => "区域录屏".into(),
         Action::AiCustom { id } => match id.as_str() {
             crate::ai_presets::TRANSLATE_ID => "AI 翻译".into(),

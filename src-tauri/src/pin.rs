@@ -29,16 +29,25 @@ pub fn spawn(app: AppHandle) {
             None
         };
         std::thread::spawn(move || {
-            // 等待隐藏提交到桌面合成器；随后恢复轨迹层，贴图继续独立运行。
+            // 等待隐藏提交到桌面合成器；冻结整屏后立即恢复轨迹层，截图继续独立运行。
             std::thread::sleep(std::time::Duration::from_millis(80));
-            if let Err(e) = gesture_platform::pin::select_and_open_after_capture(move || drop(restore))
-            {
-                log::error!("创建贴图失败: {e:#}");
-                crate::engine::toast(&owner, &format!("贴图失败：{e}"));
+            if let Err(e) = gesture_platform::pin::screenshot(move || drop(restore)) {
+                log::error!("截图失败: {e:#}");
+                crate::engine::toast(&owner, &format!("截图失败：{e}"));
             }
         });
     }) {
-        log::error!("调度贴图失败: {e}");
-        crate::engine::toast(&app, &format!("贴图失败：{e}"));
+        log::error!("调度截图失败: {e}");
+        crate::engine::toast(&app, &format!("截图失败：{e}"));
     }
+}
+
+/// 贴图键：贴出剪贴板或恢复关闭过的贴图；贴出的贴图在该线程上运行到关闭。
+pub fn spawn_paste(app: AppHandle) {
+    std::thread::spawn(move || {
+        if let Err(e) = gesture_platform::pin::paste() {
+            log::warn!("贴图失败: {e:#}");
+            crate::engine::toast(&app, &format!("{e}"));
+        }
+    });
 }
