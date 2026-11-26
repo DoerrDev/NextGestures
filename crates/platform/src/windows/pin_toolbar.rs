@@ -179,6 +179,7 @@ struct Toolbar {
     buttons: Vec<(u16, HWND)>,
     font: HFONT,
     scale: f64,
+    layout_size: Option<(i32, i32)>,
     alpha: u8,
     feedback: Option<(u16, Instant)>,
     busy: bool,
@@ -661,6 +662,7 @@ pub(super) fn create(owner: HWND, alpha: u8, staging: bool) -> Result<()> {
             buttons,
             font: HFONT::default(),
             scale,
+            layout_size: None,
             alpha,
             feedback: None,
             busy: false,
@@ -686,9 +688,36 @@ pub(super) fn create(owner: HWND, alpha: u8, staging: bool) -> Result<()> {
 }
 
 pub(super) fn position() -> Result<()> {
-    let owner = BAR.with(|b| b.borrow().as_ref().map(|b| (b.owner, b.staging)));
-    let Some((owner, staging)) = owner else { return Ok(()) };
+    let state = BAR.with(|b| {
+        b.borrow()
+            .as_ref()
+            .map(|b| (b.owner, b.staging, b.window, b.layout_size, b.scale))
+    });
+    let Some((owner, staging, window, layout_size, previous_scale)) = state else {
+        return Ok(());
+    };
     let (rect, scale) = layout(owner, staging)?;
+    let size = (rect.right - rect.left, rect.bottom - rect.top);
+    if layout_size == Some(size) && previous_scale == scale {
+        unsafe {
+            let mut current = RECT::default();
+            GetWindowRect(window, &mut current)?;
+            if current == rect {
+                return Ok(());
+            }
+            let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
+            let frame = toolbar_frame(window);
+            if frame.is_invalid() {
+                SetWindowPos(window, None, rect.left, rect.top, 0, 0, flags)?;
+            } else {
+                let batch = BeginDeferWindowPos(2)?;
+                let batch = DeferWindowPos(batch, window, None, rect.left, rect.top, 0, 0, flags)?;
+                let batch = DeferWindowPos(batch, frame, None, rect.left, rect.top, 0, 0, flags)?;
+                EndDeferWindowPos(batch)?;
+            }
+        }
+        return Ok(());
+    }
     let state = BAR.with(|b| {
         let mut b = b.borrow_mut();
         let b = b.as_mut().unwrap();
@@ -739,6 +768,11 @@ pub(super) fn position() -> Result<()> {
         }
         let _ = InvalidateRect(Some(state.0), None, true);
     }
+    BAR.with(|b| {
+        if let Some(b) = b.borrow_mut().as_mut() {
+            b.layout_size = Some(size);
+        }
+    });
     Ok(())
 }
 

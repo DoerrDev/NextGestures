@@ -39,6 +39,7 @@ struct Selection {
     drag: Option<RECT>,
     result: Option<Region>,
     frame: Option<PaintBuffer>,
+    painted_selection: Option<RECT>,
     /// 截图模式：框选前冻结的整屏画面，框选时以它为底而不是透出实时桌面。
     frozen: Option<Rc<Frozen>>,
     /// 框选完成后窗口留作截图编辑的暗色背景，不再响应框选。
@@ -89,17 +90,28 @@ impl Frozen {
 
     /// 截取桌面坐标中的矩形（须位于屏幕内），返回 BGRA 字节。
     pub(super) fn crop(&self, rect: RECT) -> Vec<u8> {
+        let width = (rect.right - rect.left) as usize * 4;
+        let height = (rect.bottom - rect.top) as usize;
+        let mut out = Vec::with_capacity(width * height);
+        for row in self.crop_rows(rect) {
+            out.extend_from_slice(row);
+        }
+        out
+    }
+
+    /// 直接读取冻结画面的选区行，拖动预览可以写进显示缓冲。
+    pub(super) fn crop_rows(&self, rect: RECT) -> impl Iterator<Item = &[u8]> {
         let stride = (self.screen.right - self.screen.left) as usize;
         let (x, y) = ((rect.left - self.screen.left) as usize, (rect.top - self.screen.top) as usize);
         let width = (rect.right - rect.left) as usize;
-        let mut out = Vec::with_capacity(width * (rect.bottom - rect.top) as usize * 4);
-        for row in 0..(rect.bottom - rect.top) as usize {
+        (0..(rect.bottom - rect.top) as usize).map(move |row| {
             let start = (y + row) * stride + x;
-            for pixel in &self.bright[start..start + width] {
-                out.extend_from_slice(&pixel.to_le_bytes());
+            let pixels = &self.bright[start..start + width];
+            // Windows stores these u32 pixels in little-endian BGRA order.
+            unsafe {
+                std::slice::from_raw_parts(pixels.as_ptr().cast::<u8>(), std::mem::size_of_val(pixels))
             }
-        }
-        out
+        })
     }
 }
 
@@ -740,6 +752,35 @@ fn changed_area(before: Option<RECT>, after: Option<RECT>) -> Option<RECT> {
     }
 }
 
+/// Split a rectangle around an interior rectangle into four non-overlapping bands.
+fn bands(outer: RECT, inner: RECT) -> impl Iterator<Item = RECT> {
+    [
+        RECT { bottom: inner.top, ..outer },
+        RECT { top: inner.bottom, ..outer },
+        RECT { top: inner.top, bottom: inner.bottom, right: inner.left, ..outer },
+        RECT { top: inner.top, bottom: inner.bottom, left: inner.right, ..outer },
+    ]
+    .into_iter()
+    .filter(|r| r.left < r.right && r.top < r.bottom)
+}
+
+fn paint_background(frame: &mut PaintBuffer, frozen: Option<&Frozen>, rect: RECT, bright: bool) {
+    match frozen {
+        Some(frozen) => frame.copy(rect, if bright { &frozen.bright } else { &frozen.dim }),
+        None => frame.fill(rect, if bright { 0x0100_0000 } else { 0x9000_0000 }),
+    }
+}
+
+fn border(rect: RECT) -> impl Iterator<Item = RECT> {
+    let inner = RECT {
+        left: (rect.left + 2).min(rect.right),
+        top: (rect.top + 2).min(rect.bottom),
+        right: (rect.right - 2).max((rect.left + 2).min(rect.right)),
+        bottom: (rect.bottom - 2).max((rect.top + 2).min(rect.bottom)),
+    };
+    bands(rect, inner)
+}
+
 fn render(hwnd: HWND, dirty: Option<RECT>) -> windows::core::Result<()> {
     let (dc, size, dirty) = SELECTION.with(|cell| {
         let mut state = cell.borrow_mut();
@@ -747,48 +788,49 @@ fn render(hwnd: HWND, dirty: Option<RECT>) -> windows::core::Result<()> {
             cx: state.screen.right - state.screen.left,
             cy: state.screen.bottom - state.screen.top,
         };
+        let incremental = dirty.is_some();
         let dirty = dirty.unwrap_or(RECT {
             right: size.cx,
             bottom: size.cy,
             ..Default::default()
         });
         let selection = state.client_selection();
+        let previous = std::mem::replace(&mut state.painted_selection, selection);
         let frozen = state.frozen.clone();
+        let frozen = frozen.as_deref();
         let frame = state.frame.as_mut().expect("selector paint buffer");
-        match &frozen {
-            Some(frozen) => frame.copy(dirty, &frozen.dim),
-            None => frame.fill(dirty, 0x9000_0000),
-        }
-        if let Some(rect) = selection
-            && let Some(inside) = intersection(dirty, rect)
-        {
-            match &frozen {
-                Some(frozen) => frame.copy(inside, &frozen.bright),
-                // Nonzero alpha keeps the highlighted interior nearly clear and still hit-testable.
-                None => frame.fill(inside, 0x0100_0000),
-            }
-            let sides = [
-                RECT {
-                    right: (rect.left + 2).min(rect.right),
-                    ..rect
-                },
-                RECT {
-                    left: (rect.right - 2).max(rect.left),
-                    ..rect
-                },
-                RECT {
-                    bottom: (rect.top + 2).min(rect.bottom),
-                    ..rect
-                },
-                RECT {
-                    top: (rect.bottom - 2).max(rect.top),
-                    ..rect
-                },
-            ];
-            for side in sides {
-                if let Some(visible) = intersection(dirty, side) {
-                    frame.fill(visible, 0xff55_d2ff);
+        if incremental {
+            let overlap = previous.zip(selection).and_then(|(a, b)| intersection(a, b));
+            if let Some(previous) = previous {
+                if let Some(overlap) = overlap {
+                    for rect in bands(previous, overlap) {
+                        paint_background(frame, frozen, rect, false);
+                    }
+                    for edge in border(previous).filter_map(|r| intersection(r, overlap)) {
+                        paint_background(frame, frozen, edge, true);
+                    }
+                } else {
+                    paint_background(frame, frozen, previous, false);
                 }
+            }
+            if let Some(selection) = selection {
+                if let Some(overlap) = overlap {
+                    for rect in bands(selection, overlap) {
+                        paint_background(frame, frozen, rect, true);
+                    }
+                } else {
+                    paint_background(frame, frozen, selection, true);
+                }
+            }
+        } else {
+            paint_background(frame, frozen, dirty, false);
+            if let Some(selection) = selection {
+                paint_background(frame, frozen, selection, true);
+            }
+        }
+        if let Some(selection) = selection {
+            for edge in border(selection) {
+                frame.fill(edge, 0xff55_d2ff);
             }
         }
         (frame.dc, size, dirty)

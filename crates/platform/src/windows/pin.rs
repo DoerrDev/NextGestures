@@ -255,14 +255,7 @@ impl Picture {
     fn compose(&self, view: View) -> Result<Surface> {
         let mut surface = Surface::new(view.width + SHADOW * 2, view.height + SHADOW * 2)?;
         paint_frame(&mut surface, self.selected);
-        let stride = surface.width as usize * 4;
-        let bytes = surface.bytes_mut();
-        for y in 0..view.height {
-            let src = ((view.y + y) as usize * self.width as usize + view.x as usize) * 4;
-            let dst = (y + SHADOW) as usize * stride + SHADOW as usize * 4;
-            bytes[dst..dst + view.width as usize * 4]
-                .copy_from_slice(&self.pixels[src..src + view.width as usize * 4]);
-        }
+        copy_surface_content(&mut surface, &self.pixels, self.width, view);
         if self.handles {
             paint_handles(&mut surface, self.ink.scale);
         }
@@ -282,19 +275,48 @@ impl Picture {
     }
 }
 
+fn copy_surface_content(surface: &mut Surface, pixels: &[u8], width: i32, view: View) {
+    let stride = surface.width as usize * 4;
+    let bytes = surface.bytes_mut();
+    for y in 0..view.height {
+        let src = ((view.y + y) as usize * width as usize + view.x as usize) * 4;
+        let dst = (y + SHADOW) as usize * stride + SHADOW as usize * 4;
+        let row_bytes = view.width as usize * 4;
+        bytes[dst..dst + row_bytes].copy_from_slice(&pixels[src..src + row_bytes]);
+    }
+}
+
 fn paint_frame(surface: &mut Surface, selected: bool) {
     let (width, height) = (surface.width - 2 * SHADOW, surface.height - 2 * SHADOW);
     let stride = surface.width as usize * 4;
     let bytes = surface.bytes_mut();
+    // Both side shadows have the same profile between the top and bottom corners.
+    let mut side = [0; SHADOW as usize * 4];
+    for (x, pixel) in side.chunks_exact_mut(4).enumerate() {
+        pixel.copy_from_slice(&edge_pixel(x as i32, SHADOW + 3, width, height, selected));
+    }
     for y in 0..height + 2 * SHADOW {
-        let columns = if (SHADOW..SHADOW + height).contains(&y) {
-            [0..SHADOW, width + SHADOW..width + 2 * SHADOW]
+        let row = &mut bytes[y as usize * stride..][..stride];
+        let right = (width + SHADOW) as usize * 4;
+        if (SHADOW + 3..SHADOW + height).contains(&y) {
+            row[..side.len()].copy_from_slice(&side);
+            for (target, source) in row[right..].chunks_exact_mut(4).zip(side.rchunks_exact(4)) {
+                target.copy_from_slice(source);
+            }
         } else {
-            [0..width + 2 * SHADOW, 0..0]
-        };
-        for x in columns.into_iter().flatten() {
-            let i = y as usize * stride + x as usize * 4;
-            bytes[i..i + 4].copy_from_slice(&edge_pixel(x, y, width, height, selected));
+            let (left, rest) = row.split_at_mut(side.len());
+            let (middle, right) = rest.split_at_mut(width as usize * 4);
+            for (x, (left, right)) in left.chunks_exact_mut(4).zip(right.rchunks_exact_mut(4)).enumerate() {
+                let color = edge_pixel(x as i32, y, width, height, selected);
+                left.copy_from_slice(&color);
+                right.copy_from_slice(&color);
+            }
+            if !(SHADOW..SHADOW + height).contains(&y) {
+                let color = edge_pixel(SHADOW, y, width, height, selected);
+                for pixel in middle.chunks_exact_mut(4) {
+                    pixel.copy_from_slice(&color);
+                }
+            }
         }
     }
 }
@@ -414,6 +436,7 @@ fn edge_pixel(x: i32, y: i32, width: i32, height: i32, selected: bool) -> [u8; 4
 struct Stage {
     frozen: Rc<Frozen>,
     backdrop: Backdrop,
+    preview: Option<RECT>,
 }
 
 /// 拖动控制点调整选区：命中码、起点光标和起始选区（桌面坐标）。
@@ -857,8 +880,8 @@ fn hit_test(hwnd: HWND, point: POINT) -> LRESULT {
     }
 }
 
-/// 截图阶段：从冻结画面重新裁剪选区（限制在屏幕内且不小于 16 像素）。
-fn set_crop(hwnd: HWND, rect: RECT) -> Result<()> {
+/// 截图阶段：更新预览，拖动结束后才同步用于标注和导出的图片。
+fn preview_crop(hwnd: HWND, rect: RECT) -> Result<()> {
     let Some(frozen) = STAGE.with(|stage| stage.borrow().as_ref().map(|s| s.frozen.clone())) else {
         return Ok(());
     };
@@ -876,22 +899,26 @@ fn set_crop(hwnd: HWND, rect: RECT) -> Result<()> {
     if image_rect(hwnd)? == rect {
         return Ok(());
     }
-    let pixels = frozen.crop(rect);
     with_picture(|p| -> Result<()> {
-        let view = View {
-            x: 0,
-            y: 0,
-            width,
-            height,
-        };
-        p.ink.base.clone_from(&pixels);
-        p.pixels = pixels;
-        p.width = width;
-        p.height = height;
-        p.view = view;
-        p.zoom = 1.0;
-        p.zoom_surface = None;
-        p.surface = p.compose(view)?;
+        if (p.surface.width, p.surface.height) != (width + SHADOW * 2, height + SHADOW * 2) {
+            let mut surface = Surface::new(width + SHADOW * 2, height + SHADOW * 2)?;
+            paint_frame(&mut surface, p.selected);
+            p.surface = surface;
+        }
+        let stride = p.surface.width as usize * 4;
+        let offset = SHADOW as usize * 4;
+        for (target, source) in p
+            .surface
+            .bytes_mut()
+            .chunks_exact_mut(stride)
+            .skip(SHADOW as usize)
+            .zip(frozen.crop_rows(rect))
+        {
+            target[offset..offset + source.len()].copy_from_slice(source);
+        }
+        if p.handles {
+            paint_handles(&mut p.surface, p.ink.scale);
+        }
         Ok(())
     })?;
     render(
@@ -900,7 +927,37 @@ fn set_crop(hwnd: HWND, rect: RECT) -> Result<()> {
             x: left - SHADOW,
             y: top - SHADOW,
         }),
-    )
+    )?;
+    STAGE.with(|stage| {
+        if let Some(stage) = stage.borrow_mut().as_mut() {
+            stage.preview = Some(rect);
+        }
+    });
+    // Layered-window updates can change bounds without a position notification.
+    bar::position()
+}
+
+fn finish_crop() {
+    let crop = STAGE.with(|stage| {
+        let mut stage = stage.borrow_mut();
+        let stage = stage.as_mut()?;
+        Some((stage.frozen.clone(), stage.preview.take()?))
+    });
+    if let Some((frozen, rect)) = crop {
+        let pixels = frozen.crop(rect);
+        with_picture(|p| {
+            p.ink.base.clone_from(&pixels);
+            p.pixels = pixels;
+            p.width = rect.right - rect.left;
+            p.height = rect.bottom - rect.top;
+            p.view = View {
+                x: 0,
+                y: 0,
+                width: p.width,
+                height: p.height,
+            };
+        });
+    }
 }
 
 fn start_resize(hwnd: HWND, edge: u32, cursor: POINT) -> Result<()> {
@@ -943,7 +1000,7 @@ fn move_resize(hwnd: HWND, resize: Resize) -> Result<()> {
         rect.right = rect.right.min(screen.right);
         rect.bottom = rect.bottom.min(screen.bottom);
     }
-    set_crop(hwnd, rect)
+    preview_crop(hwnd, rect)
 }
 
 fn start_drag(hwnd: HWND, cursor: POINT) -> Result<()> {
@@ -970,7 +1027,7 @@ fn move_drag(hwnd: HWND, offset: POINT) -> Result<()> {
             let image = image_rect(hwnd)?;
             let left = cursor.x - offset.x + SHADOW;
             let top = cursor.y - offset.y + SHADOW;
-            return set_crop(
+            return preview_crop(
                 hwnd,
                 RECT {
                     left,
@@ -996,6 +1053,9 @@ fn move_drag(hwnd: HWND, offset: POINT) -> Result<()> {
 
 fn stop_drag(hwnd: HWND) -> bool {
     let dragging = DRAG_OFFSET.take().is_some() | RESIZE.take().is_some();
+    if dragging {
+        finish_crop();
+    }
     unsafe {
         if dragging && GetCapture() == hwnd {
             let _ = ReleaseCapture();
@@ -1041,6 +1101,7 @@ pub fn screenshot(captured: impl FnOnce()) -> Result<()> {
         Some(Stage {
             frozen,
             backdrop,
+            preview: None,
         }),
     )
 }
@@ -1492,6 +1553,9 @@ fn command(hwnd: HWND, id: u16) {
         return;
     }
     let stage = staging();
+    if stage {
+        stop_drag(hwnd);
+    }
     let result = (|| -> Result<()> {
         match id {
             bar::COPY => {
@@ -1652,7 +1716,17 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
-                if !stop_drag(hwnd) {
+                if staging() && (RESIZE.get().is_some() || DRAG_OFFSET.get().is_some()) {
+                    let result = if let Some(resize) = RESIZE.get() {
+                        move_resize(hwnd, resize)
+                    } else if let Some(offset) = DRAG_OFFSET.get() {
+                        move_drag(hwnd, offset)
+                    } else {
+                        Ok(())
+                    };
+                    stop_drag(hwnd);
+                    report_render_error(result);
+                } else if !stop_drag(hwnd) {
                     report_render_error(ink::pointer_up(hwnd));
                 }
                 LRESULT(0)
@@ -1660,6 +1734,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
             WM_CAPTURECHANGED => {
                 DRAG_OFFSET.set(None);
                 RESIZE.set(None);
+                finish_crop();
                 DefWindowProcW(hwnd, message, wp, lp)
             }
             WM_CANCELMODE => {
@@ -1883,6 +1958,134 @@ mod tests {
         assert_eq!((info.width, info.height), (1, 2));
         assert_eq!(pixels, vec![255, 0, 0, 255, 0, 0, 255, 255]);
     }
+    #[test]
+    #[ignore = "opens the native screenshot selector and moves the desktop cursor; run alone"]
+    fn desktop_screenshot_toolbar_tracks_crop() {
+        use std::time::{Duration, Instant};
+        use windows::core::PCWSTR;
+
+        fn find(class: PCWSTR) -> HWND {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(hwnd) = unsafe { FindWindowW(class, None) }
+                    && unsafe { IsWindowVisible(hwnd).as_bool() }
+                {
+                    return hwnd;
+                }
+                assert!(Instant::now() < deadline, "expected window did not appear");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        fn pack(x: i32, y: i32) -> LPARAM {
+            LPARAM((u32::from(x as u16) | (u32::from(y as u16) << 16)) as isize)
+        }
+
+        fn bounds(hwnd: HWND) -> RECT {
+            let mut rect = RECT::default();
+            unsafe { GetWindowRect(hwnd, &mut rect) }.unwrap();
+            rect
+        }
+
+        fn desktop_pixel(x: i32, y: i32) -> COLORREF {
+            unsafe {
+                windows::Win32::Graphics::Dwm::DwmFlush().unwrap();
+                let dc = GetDC(None);
+                assert!(!dc.is_invalid());
+                let pixel = GetPixel(dc, x, y);
+                ReleaseDC(None, dc);
+                assert_ne!(pixel.0, u32::MAX);
+                pixel
+            }
+        }
+
+        let worker = std::thread::spawn(|| screenshot(|| {}));
+        unsafe {
+            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let mut original_cursor = POINT::default();
+            GetCursorPos(&mut original_cursor).unwrap();
+            let selector = find(w!("NextGesturesRegionSelector"));
+            let desktop = bounds(selector);
+            let mut info = MONITORINFO {
+                cbSize: size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            let monitor = MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY);
+            assert!(GetMonitorInfoW(monitor, &mut info).as_bool());
+            let x = (info.rcWork.left + info.rcWork.right) / 2 - 150;
+            let y = (info.rcWork.top + info.rcWork.bottom) / 2 - 150;
+            let a = pack(x - desktop.left, y - desktop.top);
+            for (msg, wp, lp) in [
+                (WM_LBUTTONDOWN, 1, a),
+                (WM_MOUSEMOVE, 1, pack(x + 270 - desktop.left, y + 190 - desktop.top)),
+                (WM_LBUTTONUP, 0, pack(x + 300 - desktop.left, y + 200 - desktop.top)),
+            ] {
+                PostMessageW(Some(selector), msg, WPARAM(wp), lp).unwrap();
+            }
+
+            let hwnd = find(w!("NextGesturesQuickPin"));
+            let toolbar = find(w!("NextGesturesPinToolbar"));
+            let thread = GetWindowThreadProcessId(hwnd, None);
+            let frame = HWND(GetPropW(toolbar, w!("NextGesturesToolbarFrame")).0);
+            assert!(!frame.is_invalid());
+            let initial_image = image_rect(hwnd).unwrap();
+            let initial_toolbar = bounds(toolbar);
+            assert_eq!((initial_image.left, initial_image.top), (x, y));
+            let sample = (x + 180, y + 120);
+            let initial_pixel = desktop_pixel(sample.0, sample.1);
+
+            let drag = |hit: u32, from: POINT, to: POINT| {
+                SetCursorPos(from.x, from.y).unwrap();
+                SendMessageW(hwnd, WM_NCLBUTTONDOWN, Some(WPARAM(hit as usize)), Some(pack(from.x, from.y)));
+                let mut info = GUITHREADINFO {
+                    cbSize: size_of::<GUITHREADINFO>() as u32,
+                    ..Default::default()
+                };
+                GetGUIThreadInfo(thread, &mut info).unwrap();
+                assert_eq!(info.hwndCapture, hwnd, "drag must capture the cursor");
+                for step in 1..=8 {
+                    SetCursorPos(
+                        from.x + (to.x - from.x) * step / 8,
+                        from.y + (to.y - from.y) * step / 8,
+                    )
+                    .unwrap();
+                    SendMessageW(hwnd, WM_MOUSEMOVE, Some(WPARAM(1)), Some(LPARAM(0)));
+                    assert_eq!(
+                        desktop_pixel(sample.0, sample.1),
+                        initial_pixel,
+                        "the same desktop pixel stays in place through the drag"
+                    );
+                }
+                let image = image_rect(hwnd).unwrap();
+                let bar = bounds(toolbar);
+                assert_eq!(bounds(frame), bar);
+                SendMessageW(hwnd, WM_LBUTTONUP, None, None);
+                assert_eq!(image_rect(hwnd).unwrap(), image);
+                assert_eq!(bounds(toolbar), bar);
+                (image, bar)
+            };
+            let (moved, moved_bar) = drag(
+                HTCAPTION,
+                POINT { x: x + 100, y: y + 100 },
+                POINT { x: x + 140, y: y + 125 },
+            );
+            assert_eq!((moved.left, moved.top), (x + 40, y + 25));
+            assert_eq!(moved_bar.left - initial_toolbar.left, 40);
+            assert_eq!(moved_bar.top - initial_toolbar.top, 25);
+            let (resized, resized_bar) = drag(
+                HTBOTTOMRIGHT,
+                POINT { x: moved.right - 1, y: moved.bottom - 1 },
+                POINT { x: moved.right + 59, y: moved.bottom + 29 },
+            );
+            assert_eq!((resized.right - moved.right, resized.bottom - moved.bottom), (60, 30));
+            assert_eq!(resized_bar.left - moved_bar.left, 30);
+            assert_eq!(resized_bar.top - moved_bar.top, 30);
+            PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)).unwrap();
+            SetCursorPos(original_cursor.x, original_cursor.y).unwrap();
+        }
+        worker.join().unwrap().unwrap();
+    }
+
     #[test]
     #[ignore = "opens a real desktop pin window; run alone"]
     fn desktop_pin_toolbar_space_fold_opacity_save_cancel_and_double_click_close() {
