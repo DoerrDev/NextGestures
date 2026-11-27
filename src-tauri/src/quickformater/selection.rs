@@ -85,17 +85,22 @@ impl Target {
         Self::current() == Some(self)
     }
 
-    // Win32 Edit and RichEdit expose exact selection offsets and a read-only style.
-    // Other controls get a copyable result instead of a speculative paste.
+    // Win32 Edit and RichEdit expose exact selection offsets and a read-only style,
+    // so they get a precise "selection unchanged" token. Every other control
+    // (browsers, Electron, Office, Qt...) has no such API: paste into it as long
+    // as the same window still has focus; the token is then a constant.
     pub fn writable_range(self) -> Option<usize> {
         unsafe {
             if !self.is_current() { return None; }
             let hwnd = HWND(self.focus as _);
+            if hwnd.0.is_null() { return Some(0); }
             let mut name = [0u16; 64];
             let len = GetClassNameW(hwnd, &mut name) as usize;
             let class = String::from_utf16_lossy(&name[..len]).to_ascii_lowercase();
-            if !(class == "edit" || class.starts_with("richedit"))
-                || GetWindowLongW(hwnd, GWL_STYLE) as u32 & ES_READONLY as u32 != 0
+            if !(class == "edit" || class.starts_with("richedit")) {
+                return Some(0);
+            }
+            if GetWindowLongW(hwnd, GWL_STYLE) as u32 & ES_READONLY as u32 != 0
                 || !IsWindowEnabled(hwnd).as_bool() { return None; }
             let mut range = 0usize;
             let sent = SendMessageTimeoutW(hwnd, 0x00b0 /* EM_GETSEL */, WPARAM(0), LPARAM(0),
@@ -307,39 +312,48 @@ pub fn replace(
     if !active() || !modifiers_released() || !target.is_current() {
         return Ok(false);
     }
-    let _access = CLIPBOARD_ACCESS
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    if !target.is_current() {
-        return Ok(false);
-    }
-    let owner = HWND(owner as _);
-    let snapshot = {
-        let clipboard = Clipboard::open(owner)?;
-        let snapshot = clipboard.snapshot()?;
-        if let Err(error) = clipboard.write_text(result, true) {
-            let _ = snapshot.restore(&clipboard);
-            return Err(error);
+    let sent = {
+        let _access = CLIPBOARD_ACCESS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !target.is_current() {
+            return Ok(false);
         }
-        snapshot
+        let hwnd = HWND(owner as _);
+        let snapshot = {
+            let clipboard = Clipboard::open(hwnd)?;
+            let snapshot = clipboard.snapshot()?;
+            if let Err(error) = clipboard.write_text(result, true) {
+                let _ = snapshot.restore(&clipboard);
+                return Err(error);
+            }
+            snapshot
+        };
+        // Windows updates the sequence when CloseClipboard publishes our write.
+        let paste_sequence = sequence();
+        let still_ours =
+            || unsafe { GetClipboardOwner() }.ok() == Some(hwnd) && sequence() == paste_sequence;
+        let paste = if active() && target.is_current() && still_ours() {
+            input::send_hotkey(&["ctrl".into(), "v".into()]).map(|()| true)
+        } else {
+            Ok(false)
+        };
+        if paste.as_ref().is_ok_and(|sent| *sent) {
+            sleep(Duration::from_millis(500));
+        }
+        let clipboard = Clipboard::open(hwnd)?;
+        if still_ours() {
+            snapshot.restore(&clipboard)?;
+        }
+        paste?
     };
-    // Windows updates the sequence when CloseClipboard publishes our write.
-    let paste_sequence = sequence();
-    let still_ours =
-        || unsafe { GetClipboardOwner() }.ok() == Some(owner) && sequence() == paste_sequence;
-    let paste = if active() && target.is_current() && still_ours() {
-        input::send_hotkey(&["ctrl".into(), "v".into()]).map(|()| true)
-    } else {
-        Ok(false)
-    };
-    if paste.as_ref().is_ok_and(|sent| *sent) {
-        sleep(Duration::from_millis(500));
-    }
-    let clipboard = Clipboard::open(owner)?;
-    if still_ours() {
-        snapshot.restore(&clipboard)?;
-    }
-    paste
+    // 回读校验：粘贴成功后选区会折叠；只读区域里原文仍被选中，此时按失败处理以便弹出结果。
+    // 取词出错（无选区、窗口切换等）无法证明失败，按成功处理。
+    Ok(sent && !still_selected(owner, target, original))
+}
+
+fn still_selected(owner: usize, target: Target, original: &str) -> bool {
+    capture(owner, target).as_deref().ok() == Some(original)
 }
 
 pub fn copy_result(owner: usize, text: &str) -> Result<()> {
