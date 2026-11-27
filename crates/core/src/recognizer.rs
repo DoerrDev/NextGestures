@@ -1,5 +1,9 @@
 pub type Point = [f32; 2];
 
+#[cfg(test)]
+#[path = "score_performance.rs"]
+mod score_performance;
+
 pub const NUM_POINTS: usize = 64;
 pub const SQUARE_SIZE: f32 = 250.0;
 
