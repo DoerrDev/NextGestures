@@ -144,7 +144,7 @@ fn hotkey_spec(config: &Config) -> (&[String], Vec<(&str, &[String])>) {
         .flat_map(|p| {
             p.gestures
                 .iter()
-                .filter(|g| g.enabled && g.has_hotkey())
+                .filter(|g| g.is_active() && g.has_hotkey())
                 .map(|g| (p.id.as_str(), g.hotkey.as_slice()))
         })
         .collect();
@@ -170,7 +170,7 @@ fn shortcut_bindings(config: &Config, strict: bool) -> Result<Vec<hotkey::Bindin
     }
     for profile in config.profiles.iter().filter(|p| !p.passthrough) {
         let mut seen = Vec::new();
-        for gesture in profile.gestures.iter().filter(|g| g.enabled && g.has_hotkey()) {
+        for gesture in profile.gestures.iter().filter(|g| g.is_active() && g.has_hotkey()) {
             let label = gesture.hotkey.join(" + ");
             let parsed = (|| {
                 let chord = hotkey::Chord::parse(&gesture.hotkey)

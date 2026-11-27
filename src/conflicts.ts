@@ -118,7 +118,7 @@ function sameTriggerContext(a: Gesture, b: Gesture): boolean {
 /** 找出触发条件相同、轨迹又相似到会互相抢匹配的手势对 */
 export function findConflicts(gestures: Gesture[], threshold: number): ConflictReport {
   // 只有快捷键的手势没有鼠标触发，不参与轨迹冲突检测
-  const list = gestures.filter((g) => g.enabled && hasMouseTrigger(g))
+  const list = gestures.filter((g) => g.enabled && g.action.kind !== 'unsupported' && hasMouseTrigger(g))
   const pairs: ConflictPair[] = []
   const ids = new Set<string>()
 

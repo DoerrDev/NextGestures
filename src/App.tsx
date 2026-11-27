@@ -473,7 +473,7 @@ export function App() {
                       tabIndex={0}
                       className={[
                         'row',
-                        g.enabled ? '' : 'off',
+                        g.enabled && g.action.kind !== 'unsupported' ? '' : 'off',
                         conflicts.ids.has(g.id) ? 'clash' : '',
                         editing && !editing.isNew && editing.gesture.id === g.id ? 'sel' : '',
                       ]
@@ -517,6 +517,7 @@ export function App() {
                         <button
                           type="button"
                           className="btn-ghost"
+                          disabled={g.action.kind === 'unsupported'}
                           title={g.enabled ? t('disable') : t('enable')}
                           onClick={(e) => {
                             e.stopPropagation()
@@ -528,6 +529,7 @@ export function App() {
                         <button
                           type="button"
                           className="btn-ghost"
+                          disabled={g.action.kind === 'unsupported'}
                           title={t('duplicate')}
                           onClick={(e) => {
                             e.stopPropagation()

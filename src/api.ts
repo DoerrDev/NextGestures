@@ -25,6 +25,7 @@ export interface KeySequenceEvent {
 
 export type Action =
   | { kind: 'none' }
+  | { kind: 'unsupported' }
   | { kind: 'screenshot' }
   | { kind: 'pin' }
   | { kind: 'record_region' }

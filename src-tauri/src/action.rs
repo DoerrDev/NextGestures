@@ -43,6 +43,7 @@ fn spawn_internal(app: AppHandle, action: Action, chord: Option<hotkey::Chord>) 
 pub fn run(app: &AppHandle, action: &Action) -> Result<()> {
     match action {
         Action::None => Ok(()),
+        Action::Unsupported => anyhow::bail!("当前版本不支持此动作"),
         Action::Screenshot => {
             crate::pin::spawn(app.clone());
             Ok(())

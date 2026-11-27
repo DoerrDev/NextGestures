@@ -64,6 +64,8 @@ const zhCN = {
   reRecord: '重新录制',
   actionKind: '动作类型',
   actionNone: '无',
+  actionUnsupported: '当前版本不支持此动作',
+  actionUnsupportedHint: '此动作已暂停，原始配置仍会保留。可升级到支持该动作的版本，或选择其他动作。',
   actionLaunchApp: '快速启动程序',
   legacyCommandHint: '此手势使用旧版命令。选择一个程序即可替换。',
   actionHotkey: '快捷键',

@@ -63,7 +63,7 @@ pub fn hotkey_gesture<'a>(
             .find_map(|p| {
                 p.gestures
                     .iter()
-                    .find(|g| g.enabled && g.has_hotkey() && is_chord(&g.hotkey))
+                    .find(|g| g.is_active() && g.has_hotkey() && is_chord(&g.hotkey))
                     .map(|g| Matched { profile_id: &p.id, gesture: g, score: 1.0 })
             })
     };
@@ -74,7 +74,7 @@ pub fn hotkey_gesture<'a>(
 pub fn requires_release(cfg: &Config, exe: &str, button: Option<TriggerButton>) -> bool {
     button == Some(TriggerButton::Right) && cfg.profiles.iter().any(|p| {
         (p.is_global() || matches_exe(p, exe)) && p.gestures.iter().any(|g| {
-            g.enabled && g.trigger == Some(TriggerButton::Right) && g.left_click
+            g.is_active() && g.trigger == Some(TriggerButton::Right) && g.left_click
         })
     })
 }
@@ -94,7 +94,7 @@ pub fn has_stroke_candidate(
 }
 
 fn matches_input(g: &Gesture, input: Input<'_>) -> bool {
-    g.enabled
+    g.is_active()
         && g.has_mouse_trigger()
         && g.trigger == input.button
         && g.wheel == input.wheel

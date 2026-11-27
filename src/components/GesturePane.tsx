@@ -506,7 +506,7 @@ export function GesturePane({
           </button>
         ) : (
           <>
-            <button type="button" className="btn-ghost" onClick={() => onToggle(initial)}>
+            <button type="button" className="btn-ghost" disabled={initial.action.kind === 'unsupported'} onClick={() => onToggle(initial)}>
               {initial.enabled ? <PowerOff size={14} strokeWidth={2} /> : <Power size={14} strokeWidth={2} />}
               {initial.enabled ? t('disable') : t('enable')}
             </button>
@@ -523,7 +523,7 @@ export function GesturePane({
             <button
               type="button"
               className="btn-ghost"
-              disabled={busy}
+              disabled={busy || draft.action.kind === 'unsupported'}
               title={t('duplicate')}
               onClick={() => onDuplicate({ ...draft, name: draft.name.trim() })}
             >

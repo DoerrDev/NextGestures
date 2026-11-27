@@ -91,6 +91,8 @@ pub enum Action {
     /// 已移除的 lua 动作读旧配置时降级为 None
     #[serde(alias = "lua")]
     None,
+    /// 配置中的动作无法在本版本运行。原始 TOML 由保存流程保留。
+    Unsupported,
     #[serde(alias = "pin_screenshot")]
     Screenshot,
     /// 贴图：截图中贴出选区；否则贴出剪贴板（图片或文字），剪贴板未变时依次恢复关闭过的贴图
@@ -129,6 +131,10 @@ impl Default for Action {
 }
 
 impl Gesture {
+    pub fn is_active(&self) -> bool {
+        self.enabled && self.action != Action::Unsupported
+    }
+
     /// 边角 + 单击：在 region 内按下并松开触发键，不画轨迹也不滚轮
     pub fn is_edge_click(&self) -> bool {
         self.trigger.is_some() && self.region.is_some() && self.points.is_empty() && self.wheel.is_empty()
@@ -344,7 +350,7 @@ impl std::fmt::Debug for AiSettings {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 struct LegacyShortcut {
     keys: Vec<String>,
-    action: Action,
+    action: toml::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -371,29 +377,37 @@ impl Default for Config {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            let cfg = Config::default();
-            cfg.save(path)?;
-            return Ok(cfg);
-        }
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("读取配置失败: {}", path.display()))?;
-        let (cfg, migrated) = Self::parse_migrating(&text)
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let cfg = Config::default();
+                cfg.save_document(path, None)?;
+                return Ok(cfg);
+            }
+            Err(error) => return Err(error).with_context(|| format!("读取配置失败: {}", path.display())),
+        };
+        let (cfg, migrated, document) = Self::read_document(&text)
             .with_context(|| format!("解析配置失败: {}", path.display()))?;
         // 一次性迁移后立即落盘，之后不再重复迁移
         if migrated {
-            cfg.save(path)?;
+            cfg.save_document(path, Some((&cfg, &document)))?;
         }
         Ok(cfg)
     }
 
     #[cfg(test)]
     fn parse(text: &str) -> Result<Self> {
-        Ok(Self::parse_migrating(text)?.0)
+        Ok(Self::read_document(text)?.0)
     }
 
     /// 解析并迁移旧版字段；第二个返回值表示内容因迁移而变化，需要写回文件
+    #[cfg(test)]
     fn parse_migrating(text: &str) -> Result<(Self, bool)> {
+        let (config, migrated, _) = Self::read_document(text)?;
+        Ok((config, migrated))
+    }
+
+    fn read_document(text: &str) -> Result<(Self, bool, toml::Table)> {
         let mut config: toml::Table = toml::from_str(text)?;
         let (legacy_ai, polish_notes) = migrate_legacy_ai_actions(&mut config);
         let shortcuts: Vec<LegacyShortcut> = match config.remove("shortcuts") {
@@ -406,10 +420,17 @@ impl Config {
             .and_then(|value| value.try_into().ok())
             .unwrap_or_default();
         // Keep AI credentials from older configs while dropping obsolete plugin switches.
-        if let Some(ai) = config
-            .remove("plugins")
-            .and_then(|mut plugins| plugins.as_table_mut()?.remove("ai"))
-        {
+        let legacy_plugin_ai = config.get_mut("plugins").and_then(|plugins| {
+            let plugins = plugins.as_table_mut()?;
+            for key in ["screenshot", "recorder", "quickformater"] {
+                plugins.remove(key);
+            }
+            plugins.remove("ai")
+        });
+        if config.get("plugins").and_then(toml::Value::as_table).is_some_and(toml::Table::is_empty) {
+            config.remove("plugins");
+        }
+        if let Some(ai) = legacy_plugin_ai {
             let settings = config
                 .entry("settings")
                 .or_insert_with(|| toml::Value::Table(toml::Table::new()));
@@ -417,7 +438,15 @@ impl Config {
                 settings.entry("ai").or_insert(ai);
             }
         }
-        let mut cfg: Self = config.try_into()?;
+        let mut supported = config.clone();
+        for gesture in gesture_tables(&mut supported) {
+            if let Some(action) = gesture.get_mut("action") {
+                if read_action(action) == Action::Unsupported {
+                    *action = toml::Value::try_from(Action::Unsupported)?;
+                }
+            }
+        }
+        let mut cfg: Self = supported.try_into()?;
         if !cfg.profiles.iter().any(|p| p.is_global()) {
             cfg.profiles.insert(0, Profile::global());
         }
@@ -427,10 +456,10 @@ impl Config {
         let seeded = cfg.seed_ai_presets(polish_notes, &legacy_ai);
         let migrated = cfg.version < CONFIG_VERSION || !shortcuts.is_empty() || !blacklist.is_empty()
             || !legacy_ai.is_empty() || seeded;
-        cfg.migrate_shortcuts(shortcuts);
+        cfg.migrate_shortcuts(shortcuts, &mut config)?;
         cfg.migrate_blacklist(blacklist);
         cfg.version = cfg.version.max(CONFIG_VERSION);
-        Ok((cfg, migrated))
+        Ok((cfg, migrated, config))
     }
 
     /// 首次运行把预设写入「我的动作」；`required` 是旧手势迁移后引用到的预设，缺了也要补上。
@@ -450,7 +479,8 @@ impl Config {
     }
 
     /// 旧版全局快捷键 → Global 配置组里只有快捷键的手势
-    fn migrate_shortcuts(&mut self, shortcuts: Vec<LegacyShortcut>) {
+    fn migrate_shortcuts(&mut self, shortcuts: Vec<LegacyShortcut>, document: &mut toml::Table) -> Result<()> {
+        let mut raw_gestures = Vec::new();
         let mut n = 0;
         for shortcut in shortcuts {
             let id = loop {
@@ -460,9 +490,10 @@ impl Config {
                     break id;
                 }
             };
+            let action = read_action(&shortcut.action);
             let gesture = Gesture {
                 id,
-                name: describe_action(&shortcut.action),
+                name: describe_action(&action),
                 enabled: true,
                 deletable: true,
                 trigger: None,
@@ -473,12 +504,28 @@ impl Config {
                 fire_mode: FireMode::OnRelease,
                 points: vec![],
                 times: vec![],
-                action: shortcut.action,
+                action,
                 hotkey: shortcut.keys,
             };
+            let mut raw = toml::Table::try_from(&gesture)?;
+            raw.insert("action".into(), shortcut.action);
+            raw_gestures.push(raw.into());
             let global = self.profiles.iter_mut().find(|p| p.is_global()).expect("global profile exists");
             global.gestures.push(gesture);
         }
+        if !raw_gestures.is_empty() {
+            let global = self.profiles.iter().find(|p| p.is_global()).expect("global profile exists");
+            let profiles = array_field(document, "profiles");
+            let index = match profiles.iter().position(|p| table_id(p) == Some(&global.id)) {
+                Some(index) => index,
+                None => {
+                    profiles.push(toml::Table::from_iter([("id".into(), global.id.clone().into())]).into());
+                    profiles.len() - 1
+                }
+            };
+            array_field(profiles[index].as_table_mut().unwrap(), "gestures").extend(raw_gestures);
+        }
+        Ok(())
     }
 
     /// 旧版黑名单 → 配置组的「交给程序自带手势」
@@ -544,13 +591,33 @@ impl Config {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
+        let previous = match std::fs::read_to_string(path) {
+            Ok(text) => {
+                let (old, _, document) = Self::read_document(&text)
+                    .with_context(|| format!("解析现有配置失败: {}", path.display()))?;
+                Some((old, document))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error).with_context(|| format!("读取配置失败: {}", path.display())),
+        };
+        self.save_document(path, previous.as_ref().map(|(old, document)| (old, document)))
+    }
+
+    fn save_document(&self, path: &Path, previous: Option<(&Self, &toml::Table)>) -> Result<()> {
+        use std::io::Write;
+
+        let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(dir)?;
+        let mut document = toml::Table::try_from(self)?;
+        if let Some((old, raw)) = previous {
+            preserve_unknown_fields(&mut document, &toml::Table::try_from(old)?, raw);
         }
         // 非 pretty 会把点集数组内联成一行，配置文件才有可读性
-        let text = toml::to_string(self)?;
-        std::fs::write(path, text)
-            .with_context(|| format!("写入配置失败: {}", path.display()))?;
+        let text = toml::to_string(&document)?;
+        let mut staging = tempfile::NamedTempFile::new_in(dir)?;
+        staging.write_all(text.as_bytes())?;
+        staging.as_file().sync_all()?;
+        staging.persist(path).with_context(|| format!("写入配置失败: {}", path.display()))?;
         Ok(())
     }
 
@@ -562,7 +629,7 @@ impl Config {
         self.profiles
             .iter()
             .flat_map(|p| &p.gestures)
-            .filter(|g| g.enabled && g.has_mouse_trigger())
+            .filter(|g| g.is_active() && g.has_mouse_trigger())
     }
 
     /// 边角滚轮手势用到的区域掩码，钩子只在这些区域接管滚轮
@@ -611,8 +678,15 @@ impl Config {
             .profile_mut(profile_id)
             .with_context(|| format!("未找到配置组: {profile_id}"))?;
         match profile.gestures.iter_mut().find(|g| g.id == gesture.id) {
-            Some(slot) => *slot = gesture,
-            None => profile.gestures.push(gesture),
+            Some(slot) => {
+                anyhow::ensure!(gesture.action != Action::Unsupported || slot.action == Action::Unsupported,
+                    "当前版本不支持此动作");
+                *slot = gesture;
+            }
+            None => {
+                anyhow::ensure!(gesture.action != Action::Unsupported, "请选择本版本支持的动作");
+                profile.gestures.push(gesture);
+            }
         }
         Ok(())
     }
@@ -629,6 +703,77 @@ impl Config {
         }
         profile.gestures.remove(idx);
         Ok(())
+    }
+}
+
+fn gesture_tables(config: &mut toml::Table) -> impl Iterator<Item = &mut toml::Value> {
+    config.get_mut("profiles")
+        .and_then(|profiles| profiles.as_array_mut())
+        .into_iter()
+        .flatten()
+        .filter_map(|profile| profile.get_mut("gestures")?.as_array_mut())
+        .flatten()
+}
+
+fn array_field<'a>(table: &'a mut toml::Table, key: &str) -> &'a mut Vec<toml::Value> {
+    table.entry(key.to_owned()).or_insert_with(|| toml::Value::Array(Vec::new())).as_array_mut()
+        .expect("configuration array was validated by serde")
+}
+
+fn read_action(value: &toml::Value) -> Action {
+    value.clone().try_into().unwrap_or(Action::Unsupported)
+}
+
+// Compare with the previous typed view so an explicit deletion of a known field or row
+// does not bring it back. Match editable table arrays by ID, not by their current order.
+fn preserve_unknown_fields(next: &mut toml::Table, previous: &toml::Table, raw: &toml::Table) {
+    for (key, source) in raw {
+        match (next.get_mut(key), previous.get(key)) {
+            (Some(target), Some(old)) => {
+                if key == "action" && action_kind(target) == Some("unsupported") && action_kind(old) == Some("unsupported") {
+                    *target = source.clone();
+                } else if key != "action" || action_kind(target) == action_kind(old) {
+                    preserve_unknown_value(target, old, source);
+                }
+            }
+            (None, None) => {
+                next.insert(key.clone(), source.clone());
+            }
+            _ => {}
+        }
+    }
+}
+
+fn action_kind(action: &toml::Value) -> Option<&str> {
+    action.get("kind")?.as_str()
+}
+
+fn table_id(value: &toml::Value) -> Option<&str> {
+    value.get("id")?.as_str()
+}
+
+fn preserve_unknown_value(next: &mut toml::Value, previous: &toml::Value, raw: &toml::Value) {
+    match (next, previous, raw) {
+        (toml::Value::Table(target), toml::Value::Table(old), toml::Value::Table(source)) => {
+            preserve_unknown_fields(target, old, source);
+        }
+        (toml::Value::Array(target), toml::Value::Array(old), toml::Value::Array(source)) => {
+            if target.iter().all(|v| table_id(v).is_some()) {
+                for item in target {
+                    let id = table_id(item);
+                    let old_item = old.iter().find(|v| table_id(v) == id);
+                    let raw_item = source.iter().find(|v| table_id(v) == id);
+                    if let (Some(old_item), Some(raw_item)) = (old_item, raw_item) {
+                        preserve_unknown_value(item, old_item, raw_item);
+                    }
+                }
+            } else if target == old && target.len() == source.len() {
+                for ((item, old_item), raw_item) in target.iter_mut().zip(old).zip(source) {
+                    preserve_unknown_value(item, old_item, raw_item);
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -653,14 +798,7 @@ fn migrate_legacy_ai_actions(config: &mut toml::Table) -> (Vec<&'static str>, bo
             used.push(id);
         }
     };
-    let gestures = config
-        .get_mut("profiles")
-        .and_then(|p| p.as_array_mut())
-        .into_iter()
-        .flatten()
-        .filter_map(|p| p.get_mut("gestures")?.as_array_mut())
-        .flatten();
-    for gesture in gestures {
+    for gesture in gesture_tables(config) {
         if let Some(action) = gesture.get_mut("action") {
             rewrite(action);
         }
@@ -694,6 +832,7 @@ fn describe_action(action: &Action) -> String {
     }
     match action {
         Action::None => "快捷键".into(),
+        Action::Unsupported => "当前版本不支持的动作".into(),
         Action::Screenshot => "截图".into(),
         Action::Pin => "贴图".into(),
         Action::RecordRegion => "区域录屏".into(),
@@ -775,6 +914,111 @@ fn arc(center: Point, r: f32, from_deg: f32, to_deg: f32, n: usize) -> Vec<Point
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn future_actions_and_fields_survive_migration_and_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, r#"
+            version = 22
+            future_top = 2026-11-27
+            [plugins]
+            future_plugin = true
+            [settings]
+            future_setting = { color = "blue" }
+            [[profiles]]
+            id = "global"
+            name = "Global"
+            future_profile = true
+            [[profiles.gestures]]
+            id = "future"
+            name = "Future"
+            trigger = "Right"
+            region = "Top"
+            hotkey = ["Ctrl", "F8"]
+            future_gesture = { hold = 2 }
+            action = { kind = "future_action", options = { target = "example" } }
+            [[profiles.gestures]]
+            id = "known"
+            name = "Known"
+            hotkey = ["Ctrl", "F8"]
+            action = { kind = "screenshot", future_quality = 10 }
+            [[profiles.gestures]]
+            id = "malformed"
+            name = "Malformed"
+            action = { kind = "open_url" }
+        "#).unwrap();
+
+        let mut config = Config::load(&path).unwrap();
+        let gestures = &config.profiles[0].gestures;
+        assert_eq!(gestures[0].action, Action::Unsupported);
+        assert!(!gestures[0].is_active());
+        assert!(gestures[1].is_active());
+        assert!(!gestures[2].is_active());
+        assert_eq!(config.edge_click_mask(), 0);
+        assert_eq!(crate::matcher::hotkey_gesture(&config, "", |_| true).unwrap().gesture.id, "known");
+
+        let migrated: toml::Table = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        config.settings.show_trail = false;
+        config.profiles[0].gestures.swap(0, 1);
+        config.profiles[0].gestures[0].hotkey.clear();
+        config.profiles[0].gestures[1].name = "Renamed".into();
+        config.save(&path).unwrap();
+        let saved: toml::Table = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["version"].as_integer(), Some(22));
+        assert!(saved["future_top"].as_datetime().is_some());
+        assert_eq!(saved["plugins"]["future_plugin"].as_bool(), Some(true));
+        assert_eq!(saved["settings"]["future_setting"]["color"].as_str(), Some("blue"));
+        assert_eq!(saved["settings"]["show_trail"].as_bool(), Some(false));
+        let profile = &saved["profiles"].as_array().unwrap()[0];
+        assert_eq!(profile["future_profile"].as_bool(), Some(true));
+        let rows = profile["gestures"].as_array().unwrap();
+        let old_rows = migrated["profiles"].as_array().unwrap()[0]["gestures"].as_array().unwrap();
+        assert_eq!(rows[0]["action"]["future_quality"].as_integer(), Some(10));
+        assert!(rows[0].get("hotkey").is_none());
+        assert_eq!(rows[1]["action"]["options"]["target"].as_str(), Some("example"));
+        assert_eq!(rows[1]["action"], old_rows[0]["action"]);
+        assert_eq!(rows[1]["name"].as_str(), Some("Renamed"));
+        assert_eq!(rows[1]["future_gesture"]["hold"].as_integer(), Some(2));
+        assert_eq!(rows[2]["action"]["kind"].as_str(), Some("open_url"));
+
+        config.profiles[0].gestures[1].action = Action::Screenshot;
+        config.profiles[0].gestures.remove(2);
+        config.save(&path).unwrap();
+        let updated_text = std::fs::read_to_string(&path).unwrap();
+        assert!(!updated_text.contains("future_action"));
+        assert!(!updated_text.contains("malformed"));
+        assert!(Config::load(&path).unwrap().profiles[0].gestures[1].is_active());
+    }
+
+    #[test]
+    fn unknown_legacy_shortcut_is_preserved_and_remains_inactive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[[shortcuts]]\nkeys = ['F8']\naction = { kind = 'future', value = 9 }\n").unwrap();
+        for _ in 0..2 {
+            let config = Config::load(&path).unwrap();
+            let migrated = &config.profiles[0].gestures[0];
+            assert_eq!(migrated.action, Action::Unsupported);
+            assert!(!migrated.is_active());
+            let text = std::fs::read_to_string(&path).unwrap();
+            let table: toml::Table = toml::from_str(&text).unwrap();
+            assert!(table.get("shortcuts").is_none());
+            let profiles = table["profiles"].as_array().unwrap();
+            let gestures = profiles[0]["gestures"].as_array().unwrap();
+            assert_eq!(gestures[0]["action"]["value"].as_integer(), Some(9));
+        }
+    }
+
+    #[test]
+    fn save_leaves_unparseable_original_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "broken = [";
+        std::fs::write(&path, original).unwrap();
+        assert!(Config::default().save(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
 
     fn hotkey_only(id: &str, keys: &[&str]) -> Gesture {
         Gesture {

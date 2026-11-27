@@ -29,7 +29,7 @@ interface Props {
   recordDisabled?: boolean
 }
 
-type EditorKind = Exclude<Action['kind'], 'command' | 'ai_custom'>
+type EditorKind = Exclude<Action['kind'], 'command' | 'ai_custom' | 'unsupported'>
 
 const KIND_LABEL: Record<EditorKind, Key> = {
   none: 'actionNone',
@@ -150,6 +150,7 @@ export function ActionEditor({ action, aiActions, onChange, onError, onRecording
     <>
       <KindTiles action={action} aiActions={aiActions} onPick={(kind) => onChange(blank(kind))}
         onPickCustom={(id) => onChange({ kind: 'ai_custom', id })} />
+      {action.kind === 'unsupported' && <p className="field-note">{t('actionUnsupportedHint')}</p>}
       {action.kind === 'screenshot' && (
         <p className="field-note">{t('screenshotActionHint')}</p>
       )}
@@ -219,6 +220,7 @@ export function ActionEditor({ action, aiActions, onChange, onError, onRecording
 
 export function describeAction(action: Action, aiActions: AiAction[]): string {
   switch (action.kind) {
+    case 'unsupported': return t('actionUnsupported')
     case 'ai_custom': return aiActions.find(a => a.id === action.id)?.name || '已移除的 AI 动作'
     case 'command':
       return `${action.program} ${action.args.join(' ')}`.trim()
