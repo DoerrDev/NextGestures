@@ -191,7 +191,8 @@ export function AiPage({ saved, profiles, onSaveActions, onRemoveAction, onSaveS
     }
   }
 
-  const configured = !!saved.base_url && !!saved.api_key
+  // 与后端一致：地址和模型必填，API 密钥可留空
+  const configured = !!saved.base_url.trim() && !!saved.model.trim()
 
   return (
     <div className="ai-page">

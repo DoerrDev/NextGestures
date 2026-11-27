@@ -11,3 +11,6 @@ build.ps1
 *.idb
 
 /NG-Doc/
+
+# 文档截图工具（本地使用）
+/docs-capture/

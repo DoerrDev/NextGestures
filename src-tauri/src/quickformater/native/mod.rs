@@ -104,7 +104,7 @@ pub(super) fn run(
     }
     let fallback = anchor::mouse_rect(cursor);
     let url = endpoint(&config.base_url).and_then(|url| {
-        ensure!(!config.model.trim().is_empty(), "请先在 AI 设置中填写模型");
+        ensure!(!config.model.trim().is_empty(), "请先在「AI 动作 → AI 服务」中填写模型");
         Ok(url)
     });
     let url = match url {
