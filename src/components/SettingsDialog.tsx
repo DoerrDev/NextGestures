@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Check, Info, MessageCircle, MessageSquareText, MousePointer2, Pipette, Spline, X } from 'lucide-react'
 import { api, TRIGGERS, type Point, type Settings, type TriggerButton, type VirtualScreenSize } from '../api'
 import { t, type Key } from '../i18n'
@@ -113,10 +113,43 @@ function ColorField({
 
 export function SettingsDialog({ initial, configPath, unread, onSave, onClose }: Props) {
   const [s, setS] = useState<Settings>(initial)
-  const [error, setError] = useState('')
-  const save = () => {
-    setError('')
-    onSave(s)
+  const latest = useRef(s)
+  const dirty = useRef(false)
+  const timer = useRef<number | undefined>(undefined)
+  const onSaveRef = useRef(onSave)
+  onSaveRef.current = onSave
+
+  const flush = () => {
+    window.clearTimeout(timer.current)
+    if (!dirty.current) return
+    const v = latest.current
+    // 输入过程中的无效中间值（如清空数字框）不保存
+    const ok =
+      v.move_threshold >= 1 && v.move_threshold <= 200 &&
+      v.match_threshold >= 0.5 && v.match_threshold <= 1 &&
+      v.trail_width >= 1 && v.trail_width <= 16 &&
+      v.glow_blur >= 0 && v.glow_blur <= 40 &&
+      v.gesture_hint_font_size >= 12 && v.gesture_hint_font_size <= 48
+    if (!ok) return
+    dirty.current = false
+    onSaveRef.current(v)
+  }
+
+  // 参数变化后自动保存（防抖）
+  useEffect(() => {
+    if (latest.current === s) return
+    latest.current = s
+    dirty.current = true
+    window.clearTimeout(timer.current)
+    timer.current = window.setTimeout(flush, 400)
+  }, [s])
+
+  // 卸载时补存
+  useEffect(() => () => flush(), [])
+
+  const close = () => {
+    flush()
+    onClose()
   }
   const [tab, setTab] = useState('trigger')
   const [autostart, setAutostart] = useState(false)
@@ -161,11 +194,11 @@ export function SettingsDialog({ initial, configPath, unread, onSave, onClose }:
   const yLimit = Math.floor(screenSize.height / 2)
 
   return (
-    <div className="mask" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+    <div className="mask" onMouseDown={(e) => e.target === e.currentTarget && close()}>
       <div className="dialog settings-dialog">
         <div className="dialog-head">
           <h2>{t('settings')}</h2>
-          <button type="button" className="btn-icon" onClick={onClose} title={t('cancel')}>
+          <button type="button" className="btn-icon" onClick={close} title={t('close')}>
             <X size={16} strokeWidth={2} />
           </button>
         </div>
@@ -438,13 +471,9 @@ export function SettingsDialog({ initial, configPath, unread, onSave, onClose }:
         </div>
 
         <div className="dialog-foot">
-          <button type="button" className="btn-outline subtle" onClick={onClose}>
-            {t('cancel')}
-          </button>
-          {error && <span role="alert">{error}</span>}
-          <button type="button" className="btn-primary" onClick={() => save()}>
+          <button type="button" className="btn-primary" onClick={close}>
             <Check size={16} strokeWidth={2} />
-            {t('save')}
+            {t('close')}
           </button>
         </div>
       </div>

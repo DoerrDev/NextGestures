@@ -232,8 +232,6 @@ export function App() {
   const saveSettings = (settings: Settings) =>
     void guard(async () => {
       await api.saveSettings(settings)
-      setSettingsOpen(false)
-      flash(t('saved'))
     })
 
   /** AI 页保存：只改 settings.ai 的指定字段，失败时抛回由页面内联显示 */
